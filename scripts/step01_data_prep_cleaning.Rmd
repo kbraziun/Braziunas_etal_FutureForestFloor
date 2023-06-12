@@ -1,0 +1,872 @@
+---
+title: "Prepare/clean BGD understory data"
+author: "Kristin Braziunas"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = '../')
+```
+
+```{r full-script, warning=FALSE, message=FALSE}
+
+#####
+# 
+## Step 1: Prepare/clean BGD understory data
+#
+#####
+
+### purpose
+# prepare response variables, which are occurrence and percent cover for understory vegetation in BGD plots
+# perform data quality checking, cleaning, and filtering/thinning as needed
+
+### libraries
+library(tidyverse)
+library(openxlsx)
+library(ggpubr)
+
+### wd is one level up, recommend set up Rproj or:
+# setwd("../")
+
+### selected sessionInfo()
+# R version 4.1.3 (2022-03-10)
+# Platform: x86_64-w64-mingw32/x64 (64-bit)
+# Running under: Windows 10 x64 (build 17763)
+# 
+# attached base packages:
+#   [1] stats     graphics  grDevices utils     datasets  methods   base     
+# 
+# other attached packages:
+#   [1] ggpubr_0.4.0    openxlsx_4.2.5  forcats_0.5.1   stringr_1.4.1   dplyr_1.0.8    
+# [6] purrr_0.3.4     readr_2.1.2     tidyr_1.2.0     tibble_3.1.6    ggplot2_3.3.5  
+# [11] tidyverse_1.3.1
+
+###
+# 1. load and prep biodiv data 
+###
+
+### response variables: occurrence and percent cover of understory vegetation by species
+# scale: 200 m2 plots
+# only forest (Wald) plots
+# mosses omitted, not differentiated by species
+# trees omitted
+
+# plot info
+plots.in <- read.table("data/BGD/NP_BGD_Biodiv_Alm_study_sites_UTM32.xls", header = TRUE, sep=";") %>%
+  rename(plot_id=plot) %>%
+  dplyr::select(c(plot_id,category))
+
+# species lookup by growth form
+spec.in <- read.xlsx("processed_data/species_lookup/species_lookup_lifeform_filled.xlsx", sheet="Sheet1")
+
+# understory vegetation by species
+veg.in <- read.xlsx("data/BGD/biodiv_vegetation_2021.xlsx", sheet="Vegetationsdaten_RLB_RLD") %>%
+  rename(plot_id = Aufnnr,
+         species_name = Artname,
+         cover_200m2 = Deckung.groß) %>%
+  # here only consider large (200m2) plot cover data
+  # highly correlated with smaller (16m2) plots, less sensitive to local variation
+  # in cover, and more closely aligns with scale at which drivers are measured
+  # replace any commas with periods
+  mutate(cover_200m2 = as.numeric(gsub(",", ".",cover_200m2))) %>% 
+  # add species lookup data
+  left_join(spec.in, by="species_name") %>%
+  # add plot-level data
+  left_join(plots.in, by="plot_id") %>%
+  # only forest
+  filter(category=="Wald") %>%
+  # simplify herb/shrub and shrub/tree
+  mutate(PlantGrowthForm = ifelse(PlantGrowthForm=="herb/shrub","herb",
+                                  ifelse(PlantGrowthForm=="shrub/tree","shrub",PlantGrowthForm))) %>%
+  # exclude trees
+  filter(PlantGrowthForm != "tree") %>%
+  mutate(PlantGrowthForm = factor(PlantGrowthForm, levels=c("fern","graminoid","herb","shrub")))
+
+# double check anything remaining in the tree layer
+unique(veg.in$Schicht)
+veg.in %>%
+  filter(Schicht=="Baumschicht 2") # 3 entries: Soldanella alpina, Salix eleagnos, Clematis vitalba
+
+###
+# 2. review species names, combine as needed
+###
+
+### create unique species table with information on presence and density
+veg.tots <- veg.in %>%
+  mutate(count = 1) %>%
+  ungroup() %>%
+  group_by(species_name, TRYSpeciesName, PlantGrowthForm) %>%
+  summarise(mean_cover_200m2 = sum(cover_200m2)/150, 
+            n_plots=sum(count)) %>%
+  # add name with no spaces for model purposes
+  mutate(species_name_model = gsub(" ","_",species_name))
+
+# write out for review
+# write.csv(veg.tots, "processed_data/species_lookup/unique_species_names_orig.csv", row.names=FALSE)
+
+### read in species name crossover
+new.names <- read.xlsx("processed_data/species_lookup/unique_species_names.xlsx", sheet="unique_species_names") %>%
+  dplyr::select(c(species_name_field,species_name_ellenberg,species_name_model,include))
+
+###
+# 3. calculate cover and presence by species, full set and subset
+###
+
+# update species names, calculate cover totals
+veg.new <- veg.in %>%
+  left_join(new.names, by=c("species_name"="species_name_field")) %>%
+  rename(old_name = species_name,
+         species_name = species_name_model) %>%
+  # sum cover across all layers
+  group_by(plot_id,species_name,PlantGrowthForm,include) %>%
+  summarise(cover = sum(cover_200m2)) %>%
+  # put in order
+  arrange(plot_id, species_name)
+
+## species count, excluding entries not ID'd to species level
+# veg.nospec <- veg.in %>% 
+#   filter(!grepl("spec.",species_name,fixed=TRUE))
+
+# how many species dropped
+length(unique(veg.in$species_name)) # 465 
+length(unique(veg.new$species_name)) # 446
+
+# check cover measurements
+sum(veg.in$cover_200m2) # 9948.5
+sum(veg.new$cover) # 9948.5
+
+### write out data, full set of species
+
+# first generate complete cases with 0s for NAs
+veg.complete <- veg.new %>%
+  ungroup() %>%
+  tidyr::expand(plot_id,species_name) %>%
+  left_join(veg.new, by=c("plot_id","species_name")) %>%
+  # remove growth form
+  dplyr::select(-c(PlantGrowthForm,include)) %>%
+  # replace NA with 0s
+  mutate(across(starts_with("cover"), ~replace_na(., 0)))
+
+# double ck
+sum(veg.new$cover)
+sum(veg.complete$cover)
+
+# add presence
+out.pres <- veg.complete %>%
+  mutate(pres = ifelse(cover>0,1,0)) %>%
+  dplyr::select(c(plot_id,species_name,pres,cover)) 
+
+# # write out, commented out for Rmd
+# write.csv(out.pres,"processed_data/understory_model/understory_presence_cover.csv",row.names=FALSE)
+
+### consider a subset of the species list
+# identify threshold number of observations based on how well presences are represented in training and testing samples
+# using  70% for training, 30% for testing
+150*0.3
+
+pres.sum <- out.pres %>%
+  group_by(species_name) %>%
+  summarise(pres=sum(pres)) 
+
+pres.sum %>%
+  ggplot(aes(x=pres)) +
+  geom_histogram() +
+  theme_bw()
+
+# seeds
+sample(1:1000,50)
+seeds <- c(321, 54, 397, 848, 146, 196, 963, 744, 440, 570, 807, 746, 990,68, 286, 909, 576, 753, 767, 346, 478, 758, 727, 754, 463,49, 906, 372, 470, 950, 922, 318, 526,  76, 60, 378, 582, 390, 751, 304, 488, 541, 122, 147, 894, 688, 490,77, 234, 579)
+
+size.out <- data.frame()
+
+for(i in 1:length(seeds)) {
+  
+  print(i)
+  
+  # take random sample of plots, using seed
+  set.seed(seeds[i])
+  test.samp <- sample(unique(out.pres$plot_id), size=150*0.3, replace=FALSE)
+  
+  # unique(test.samp)
+  
+  # get training data
+  training.data <- out.pres %>%
+    filter(!plot_id %in% c(test.samp)) %>%
+    group_by(species_name) %>%
+    summarise(pres_train=sum(pres)) 
+  
+  # combine with testing and overall presence data
+  test.data <- out.pres %>%
+    filter(plot_id %in% c(test.samp)) %>%
+    group_by(species_name) %>%
+    summarise(pres_test = sum(pres)) %>%
+    left_join(training.data, by="species_name") %>%
+    left_join(pres.sum, by="species_name")
+  
+  # recode to indicate how often species is present in training and in test in relation to total # species occurrences
+  size.eval <- test.data %>%
+    mutate(across(c(pres_test,pres_train),~ifelse(.>0,1,0))) %>%
+    group_by(pres) %>%
+    summarise(pres_test = mean(pres_test), pres_train=mean(pres_train)) 
+  
+  # add to output
+  size.out <- rbind(size.out, size.eval)
+  
+}
+
+# assess which sample size reliably occurs in both
+size.out %>%
+  ggplot(aes(x=pres,y=pres_test)) +
+  stat_summary(fun.data="mean_cl_normal") +
+  theme_bw()
+
+size.out %>%
+  ggplot(aes(x=pres,y=pres_train)) +
+  stat_summary(fun.data="mean_cl_normal") +
+  theme_bw()
+
+size.out %>%
+  group_by(pres) %>%
+  summarise_all(mean)
+
+pres.sum %>%
+  group_by(pres) %>%
+  tally()
+# a few options: 
+# for 4+ occurrences, 99.6% of training datasets have presence, >75% of test
+# for 5+ occurrences, 99.7% of training datasets have presence, >80% of test
+# for 7+ occurrences, 99.8% of training datasets have presence, >90% of test
+# 7 is present in 5% of plots (used in Romme et al. 2016). 5 is where it starts to level off a bit (CIs start to overlap), try this, still then assess how well model performs based on presence
+# note that after updating SDM fitting process to weight presences and absences, can force inclusion of at least 1 presence in training and test with only 2+ occurrences
+
+
+### apply new subset rule, >= 5 observations in data
+# drop entries not clearly identified to species level or in 1 case, unable to be 
+# differentiated from other species in same "agg." group
+veg.sub <- veg.new %>%
+  ungroup() %>%
+  filter(include=="yes") %>%
+  group_by(species_name) %>%
+  # n observations (# plots)
+  tally() %>%
+  # subset to remove species in <5%
+  filter(n >= 5)
+unique(veg.sub$species_name)
+# 248 species
+
+veg.red <- veg.new %>%
+  filter(species_name %in% c(veg.sub$species_name))
+
+### how much of total cover is represented by these species?
+totc.full <- veg.new %>%
+  ungroup() %>%
+  # add richness count, only for included species
+  mutate(count = ifelse(include=="yes",1,0)) %>%
+  group_by(plot_id) %>%
+  summarise(tot_cover_all = sum(cover),
+            tot_richness = sum(count))
+
+totc.red <- veg.red %>%
+  ungroup() %>%
+  # add richness count
+  mutate(count=1) %>%
+  group_by(plot_id) %>%
+  summarise(tot_cover_red = sum(cover),
+            red_richness=sum(count)) %>%
+  # join with total
+  left_join(totc.full, by="plot_id") %>%
+  # pct of total
+  mutate(tot_cover_pct = tot_cover_red/tot_cover_all * 100,
+         richness_pct = red_richness/tot_richness * 100)
+
+summary(totc.red) # captures 74-100% of total cover, mean 97%, 79-100 % of total richness with "spec." excluded, mean 96%
+
+totc.red %>%
+  ggplot(aes(x=tot_cover_all, y=tot_cover_red)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+  stat_cor(method="pearson", cor.coef.name="r", p.digits=NA, label.sep="") +
+  theme_bw()
+# r2=0.99
+
+totc.red %>%
+  ggplot(aes(x=tot_richness, y=red_richness)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+  stat_cor(method="pearson", cor.coef.name="r", p.digits=NA, label.sep="") +
+  theme_bw()
+# r2=0.98
+# not perfect, but pretty good, just a few outliers not quite captured
+
+# examine plots with lower cover represented
+totc.red %>%
+  filter(tot_cover_pct < 80)
+
+### write out data
+veg.subout <- veg.red %>%
+  ungroup() %>%
+  tidyr::expand(plot_id,species_name) %>%
+  left_join(veg.red, by=c("plot_id","species_name")) %>%
+  # remove growth form
+  dplyr::select(-c(PlantGrowthForm,include)) %>%
+  # replace NA with 0s
+  mutate(across(starts_with("cover"), ~replace_na(., 0)))
+
+# double ck
+sum(veg.red$cover)
+sum(veg.subout$cover)
+
+# output for presence
+red.pres <- veg.subout %>%
+  mutate(pres = ifelse(cover>0,1,0)) %>%
+  dplyr::select(c(plot_id,species_name,pres)) %>%
+  left_join(veg.subout, by=c("plot_id","species_name"))
+
+# # write out, commented out for Rmd
+# write.csv(red.pres, "processed_data/understory_model/understory_subset_presence_cover.csv",row.names=FALSE)
+
+
+### look at representation of red list species
+
+# how many species in original dataset are on red list
+# lookup for red list and current hazard, from BIB website
+# https://daten-bayernflora-de.translate.goog/de/rl_pflanzen.php?_x_tr_sl=auto&_x_tr_tl=en&_x_tr_hl=en
+# Endangered: 0-3, G; Rare: R; Pre-warning/conservation concern: V
+unique(veg.in$RLB)
+unique(veg.in$RLD)
+
+veg.in %>%
+  group_by(species_name) %>%
+  # just take first entry
+  slice(1) %>%
+  # red list and current hazard, from BIB website
+  mutate(RLB = ifelse(RLB %in% c("3","G","2"),"endangered",
+                      ifelse(RLB %in% c("R"),"rare",
+                             ifelse(RLB %in% c("V"),"warning",NA))),
+         RLD = ifelse(RLD %in% c("3","2","G"),"endangered",
+                      ifelse(RLD %in% c("R"),"rare",
+                             ifelse(RLD %in% c("V"),"warning",NA)))) %>%
+  group_by(RLB,RLD) %>%
+  tally()
+
+15+4+11
+15+1+9+2
+# 30 on RLB endangered, 27 on RLD endangered
+4+6+30+6 # 46 RLD rare or warning
+
+# how many red list in reduced version
+red.pres %>%
+  filter(pres !=0) %>%
+  # mutate(species_name = gsub("_"," ",species_name)) %>%
+  left_join(new.names, by=c("species_name"="species_name_model")) %>%
+  left_join(veg.in, by=c("plot_id","species_name_field"="species_name")) %>%
+  group_by(species_name) %>%
+  # just take first entry
+  slice(1) %>%
+  # red list and current hazard, from BIB website
+  mutate(RLB = ifelse(RLB %in% c("3","G","2"),"endangered",
+                      ifelse(RLB %in% c("R"),"rare",
+                             ifelse(RLB %in% c("V"),"warning",NA))),
+         RLD = ifelse(RLD %in% c("3","2","G"),"endangered",
+                      ifelse(RLD %in% c("R"),"rare",
+                             ifelse(RLD %in% c("V"),"warning",NA)))) %>%
+  group_by(RLB,RLD) %>%
+  tally()
+
+# 9 RLB, 12 RLD
+# 23 rare/warning
+
+# save this
+veg.in %>%
+  left_join(new.names, by=c("species_name"="species_name_field")) %>%
+  group_by(species_name_model) %>%
+  # just take first entry
+  slice(1) %>%
+  # red list and current hazard, from BIB website
+  mutate(RLB = ifelse(RLB %in% c("3","G","2"),"endangered",
+                      ifelse(RLB %in% c("R"),"rare",
+                             ifelse(RLB %in% c("V"),"warning","not_on_list"))),
+         RLD = ifelse(RLD %in% c("3","2","G"),"endangered",
+                      ifelse(RLD %in% c("R"),"rare",
+                             ifelse(RLD %in% c("V"),"warning","not_on_list")))) %>%
+  dplyr::select(c(species_name_model,RLB,RLD)) %>%
+  rename(species_name=species_name_model) # %>%, commented out for Rmd
+  # write.csv("processed_data/species_lookup/red_list_status.csv", row.names=FALSE)
+
+###
+# 4. plot-level totals for percent cover and richness
+###
+
+### cover: include all species
+cover.tot <- veg.complete %>%
+  ungroup() %>%
+  group_by(plot_id) %>%
+  summarise(cover_pct = sum(cover))
+
+## write out commented out for Rmd
+# write.csv(cover.tot, "processed_data/understory_model/plot_cover.csv",row.names=FALSE)
+
+### richness: only for species subset
+rich.tot <- red.pres %>%
+  ungroup() %>%
+  group_by(plot_id) %>%
+  summarise(richness = sum(pres))
+
+# could write out here, but moving on to computing plot-level ellenberg indicator values
+
+###
+# 5. compute ellenberg indicator values
+###
+
+# load ellenberg lookup data
+ellen.in <- read.xlsx("processed_data/species_lookup/species_lookup_ellenberg.xlsx", sheet="species_lookup_ellenberg")
+
+# first get names in order
+# unique matchup between new species names and ellenberg names
+ellen.names <- new.names %>%
+  dplyr::select(-species_name_field) %>%
+  group_by(species_name_ellenberg,species_name_model) %>%
+  slice(1)
+
+### Q: are weighted means and non-weighted means relatively consistent? (would support use of P/A data as an alternative to cover to estimate plot-level values)?
+
+# try with reduced version too
+veg.dataset <- veg.complete
+veg.dataset <- veg.complete %>%
+  filter(species_name %in% c(red.pres$species_name))
+
+# match up species name with ellenberg
+ellen.cover <- veg.dataset %>%
+  # join to ellenberg lookup names
+  left_join(ellen.names, by=c("species_name"="species_name_model")) %>%
+  # join to ellenberg indicators
+  left_join(ellen.in, by=c("species_name_ellenberg"="species_name")) %>%
+  dplyr::select(-c(TRYSpeciesID:TraitName,Reference)) 
+
+# how much of total cover includes plants with no assigned ellenberg values
+ellen.na <- ellen.cover %>% 
+  # add total plot cover
+  left_join(cover.tot, by="plot_id") %>%
+  # proportion cover by species
+  mutate(cover_prop = cover/cover_pct) %>%
+  # remove unneeded columns
+  dplyr::select(-DataName) %>%
+  # select NA values
+  filter(is.na(OriglName)) %>%
+  pivot_wider(names_from=OriglName, values_from=OrigValueStr) %>%
+  # sum prop cover of NA species
+  group_by(plot_id) %>%
+  summarise(cover_prop = sum(cover_prop))
+summary(ellen.na)
+ellen.na %>%
+  filter(cover_prop > 0.4)
+# generally less than 2% of cover is assigned NA, but 2 plots have ~50% cover given as NA
+
+# prepare data for mean calcs, only species present, remove missing values, etc.
+ellen.plotprep <- ellen.cover %>%
+  # only species that are present
+  filter(cover>0) %>%
+  # remove unneeded column
+  dplyr::select(-DataName) %>%
+  # remove missing values, also values coded as ? (unknown) or x (insensitive)
+  filter(!is.na(OriglName), !OrigValueStr %in% c("?","x")) %>%
+  # assign 0B as 0 
+  mutate(OrigValueStr = ifelse(OrigValueStr=="0B",0,OrigValueStr)) %>%
+  # all values should now be numeric
+  mutate(OrigValueStr=as.numeric(OrigValueStr)) 
+
+ellen.plotprep %>%
+  pivot_wider(names_from=OriglName, values_from=OrigValueStr)
+# note 7833 rows out of 8001 in original veg in
+7833/8001 # includes 98% of observations
+# 7486 in reduced version
+7475/8001 # 93.4% of observations
+
+# function to compute ellenberg mean and wtmean licht, T, F, N for given set of species
+ellen_compute <- function(df.in, sp.list) {
+  ellen.sub <- df.in %>%
+    # subset to species list
+    filter(species_name %in% c(sp.list)) %>%
+    # combine with ellenberg indicator data
+    # first get sp name lookup from ellenberg lookup table
+    left_join(ellen.names, by=c("species_name"="species_name_model")) %>%
+    left_join(ellen.in, by=c("species_name_ellenberg"="species_name")) %>%
+    # remove missing values, also values coded as ? (unknown) or x (insensitive)
+    filter(!is.na(OriglName), !OrigValueStr %in% c("?","x")) %>%
+    # assign 0B as 0
+    mutate(OrigValueStr = ifelse(OrigValueStr=="0B",0,OrigValueStr)) %>%
+    # all values should now be numeric
+    mutate(OrigValueStr=as.numeric(OrigValueStr)) %>%
+    # get 1 entry per individual
+    dplyr::select(c(plot_id,species_name,cover,OriglName,OrigValueStr)) %>%
+    # only present species
+    filter(cover>0) %>%
+    # mean and wted mean
+    group_by(plot_id,OriglName) %>%
+    summarise(mean=mean(OrigValueStr),
+              wtmean=sum(OrigValueStr*cover)/sum(cover))
+  
+}
+
+ellen.complete <- ellen_compute(veg.complete, veg.complete$species_name)
+
+ellen.complete %>%
+  ggplot(aes(x=wtmean, y=mean)) +
+  facet_wrap(~OriglName, scales="free") +
+  geom_abline(slope=1,intercept=0, color="red") +
+  geom_point() +
+  stat_cor(method="spearman", cor.coef.name="rho", p.digits=NA, label.sep="") +
+  theme_bw()
+
+ellen.subset <- ellen_compute(veg.complete, red.pres$species_name)
+
+ellen.subset %>%
+  ggplot(aes(x=wtmean, y=mean)) +
+  facet_wrap(~OriglName, scales="free") +
+  geom_abline(slope=1,intercept=0, color="red") +
+  geom_point() +
+  stat_cor(method="spearman", cor.coef.name="rho", p.digits=NA, label.sep="") +
+  theme_bw()
+
+# reduced set mean v. complete set wted mean
+ellen.complete %>%
+  left_join(ellen.subset, by=c("plot_id","OriglName")) %>%
+  ggplot(aes(x=wtmean.x, y=mean.y)) +
+  facet_wrap(~OriglName, scales="free") +
+  geom_abline(slope=1,intercept=0, color="red") +
+  geom_point() +
+  stat_cor(method="spearman", cor.coef.name="rho", p.digits=NA, label.sep="") +
+  theme_bw()
+
+# values not identical, but some of the key players of temperature T, light, and fertility N are very strongly positively correlated.
+
+# quick comparison to some of our predictor values (relies on step02 script already completed)
+pred.in <- read.csv("processed_data/understory_model/predictors_fullset.csv")
+
+# light v. light
+pred.in %>%
+  left_join(ellen.subset, by="plot_id") %>% 
+  filter(OriglName=="Licht") %>%
+  pivot_longer(c(mean, wtmean)) %>%
+  ggplot(aes(x=TSFdec,y=value)) +
+  facet_wrap(~name) +
+  geom_point() +
+  stat_cor(method="spearman", cor.coef.name="rho", p.digits=NA, label.sep="") +
+  theme_bw()
+# wt mean slightly better at capturing gradient
+
+# temp v. temp
+pred.in %>%
+  left_join(ellen.subset, by="plot_id") %>% 
+  filter(OriglName=="T") %>%
+  pivot_longer(c(mean, wtmean)) %>%
+  ggplot(aes(x=mean_temp,y=value)) +
+  facet_wrap(~name) +
+  geom_point() +
+  stat_cor(method="spearman", cor.coef.name="rho", p.digits=NA, label.sep="") +
+  theme_bw()
+# mean slightly better at capturing gradient, but almost identical
+
+# moist v. prec
+pred.in %>%
+  left_join(ellen.subset, by="plot_id") %>% 
+  filter(OriglName=="F") %>%
+  pivot_longer(c(mean, wtmean)) %>%
+  ggplot(aes(x=summer_prec,y=value)) +
+  facet_wrap(~name) +
+  geom_point() +
+  stat_cor(method="spearman", cor.coef.name="rho", p.digits=NA, label.sep="") +
+  theme_bw()
+# both poor
+
+# fert v. fert
+pred.in %>%
+  left_join(ellen.subset, by="plot_id") %>% 
+  filter(OriglName=="N") %>%
+  pivot_longer(c(mean, wtmean)) %>%
+  ggplot(aes(x=soil_fert,y=value)) +
+  facet_wrap(~name) +
+  geom_point() +
+  stat_cor(method="spearman", cor.coef.name="rho", p.digits=NA, label.sep="") +
+  theme_bw()
+# mean slightly better, but both weak
+
+# seems like straight mean and wted mean are consistent and both robust, esp for light, temp, fert (harder to interpret salinity b/c so many 0s in there)
+
+### Q: how are species distributed in their EIVs, are there clear optima?
+
+# all obs
+ellen.plotprep %>%
+  ggplot(aes(x=OrigValueStr)) +
+  facet_wrap(~OriglName, scales="free") +
+  geom_histogram() +
+  theme_bw()
+
+# 1 obs per species
+ellen.plotprep %>%
+  group_by(species_name_ellenberg,OriglName) %>%
+  slice(1) %>%
+  ggplot(aes(x=OrigValueStr)) +
+  facet_wrap(~OriglName, scales="free") +
+  geom_histogram() +
+  theme_bw()
+
+# in case of key values F, licht, T, and it seems N too, species tend to be assigned middle values moreso than extremes. to me this implies a likely non-monotonic relationship with the driver variables, assuming both low and high extremes are represented in the dataset
+
+### write out plot richness and mean EIV
+ellen.out <- ellen.subset %>%
+  dplyr::select(-wtmean) %>%
+  pivot_wider(names_from="OriglName", values_from="mean") %>%
+  left_join(rich.tot, by="plot_id") %>%
+  pivot_longer(c(F:richness))
+
+### write out commented out for Rmd
+# write.csv(ellen.out, "processed_data/understory_model/plot_subset_richness_ellenberg.csv", row.names=FALSE)
+
+###
+# 6. characterize functional groups
+###
+
+### Ellenberg categories: preference for light and temperature/elevation zones
+
+func.groups <- veg.new %>%
+  # join to plant growth form
+  left_join(out.pres, by=c("species_name","plot_id","cover")) %>%
+  # 1 row per species
+  group_by(species_name,PlantGrowthForm) %>%
+  summarise(cover=sum(cover),pres=sum(pres)) %>%
+  ungroup() %>%
+  # join to ellenberg lookup names
+  left_join(ellen.names, by=c("species_name"="species_name_model")) %>%
+  # remove unneeded name columns
+  # join to ellenberg indicators
+  left_join(ellen.in, by=c("species_name_ellenberg"="species_name")) %>%
+  dplyr::select(-c(TRYSpeciesID:TraitName,Reference)) 
+
+func.ellensums <- func.groups %>%
+  group_by(OriglName,OrigValueStr) %>%
+  tally()
+
+func.cats <- func.groups %>%
+  dplyr::select(-c(DataName)) %>%
+  pivot_wider(names_from="OriglName",values_from="OrigValueStr") %>%
+  mutate(licht_cat = ifelse(Licht %in% c("1","2","3","4","5","x"), "shade-tol-indiff",
+                                   ifelse(Licht %in% c("6","7","8","9"),"light-pref",NA)),
+         temp_cat = ifelse(T %in% c("1","2","3"),"subalpine-alpine",
+                           ifelse(T %in% c("4","5","6","7"),"submontane-montane",
+                                  ifelse(T %in% c("x"),"indiff",NA)))) %>%
+  dplyr::select(c(species_name,species_name_ellenberg,cover,pres,PlantGrowthForm,licht_cat,temp_cat))
+  
+func.firstck <- func.cats %>%
+  mutate(n_species=1) %>%
+  group_by(PlantGrowthForm,licht_cat,temp_cat) %>%
+  summarise(across(c(cover,pres,n_species),~sum(.)))
+
+# func.licht <- func.cats %>%
+#   group_by(PlantGrowthForm,licht_cat) %>%
+#   tally()
+# 
+# func.temp <- func.cats %>%
+#   group_by(PlantGrowthForm,temp_cat) %>%
+#   tally()
+
+### TRY categories
+try.traits <- read.csv("data/Traits/TRY_full_PFT_traits/TRY_PFT_traits.csv", header=TRUE) %>%
+  # just get the traits
+  filter(!is.na(TraitID)) 
+
+unq <- unique(try.traits$OrigValueStr)
+# print(unq)[1000:1900]
+
+phen.traits <- try.traits %>%
+  filter(OrigValueStr %in% c("perennial","perennials","always pluriennial-pollakanthic","Perennial","poly-annuals < 5 years (short-lived perennials)","poly-annuals > 50 years (long-lived perennials)","poly-annuals 5-50 years (medium-lived perennials)","perennial forb","perennial/woody","perennial grass","Herbaceous perennial","biennial/perennial","bisannual/perennial","biennial-perennial","always biennial, always pluriennial-hapaxanthic","always biennial, always pluriennial-pollakanthic","perennial <50 yrs","long lived perennial >= 50 yrs.","Perennial grass","Biennial, Perennial","biennial","Biennial","annual","Annual","annual forb","annuals","summer annuals","winter annuals","always annual","annual-winter annual","therophyte","Therophyte (annual land plant)","Therophyte","always Therophyte","annual-winter annual, biennial","annual/biennial","therophyte/hemicryptophyte","Therophyte/Hemicryptophyte","always annual, always biennial","annual/perennial","Annual, Perennial","annual-perennial","always annual, always biennial, always pluriennial-pollakanthic")) %>%
+  mutate(lifeHistory=ifelse(OrigValueStr %in% c("perennial","perennials","always pluriennial-pollakanthic","Perennial","poly-annuals < 5 years (short-lived perennials)","poly-annuals > 50 years (long-lived perennials)","poly-annuals 5-50 years (medium-lived perennials)","perennial forb","perennial/woody","perennial grass","Herbaceous perennial","biennial/perennial","bisannual/perennial","biennial-perennial","always biennial, always pluriennial-hapaxanthic","always biennial, always pluriennial-pollakanthic","perennial <50 yrs","long lived perennial >= 50 yrs.","Perennial grass","Biennial, Perennial","biennial","Biennial"),"biennial-perennial",
+                            ifelse(OrigValueStr %in% c("annual","Annual","annual forb","annuals","summer annuals","winter annuals","always annual","annual-winter annual","therophyte","Therophyte (annual land plant)","Therophyte","always Therophyte"),"annual",
+                                   ifelse(OrigValueStr %in% c("annual-winter annual, biennial","annual/biennial","therophyte/hemicryptophyte","Therophyte/Hemicryptophyte","always annual, always biennial","annual/perennial","Annual, Perennial","annual-perennial","always annual, always biennial, always pluriennial-pollakanthic"), "double-check",NA)))) %>%
+  group_by(AccSpeciesID,AccSpeciesName,lifeHistory) %>%
+  tally() %>%
+  slice_max(n, with_ties=TRUE)
+
+# any species with contrasting entries
+phen.test <- phen.traits %>%
+  group_by(AccSpeciesID,AccSpeciesName) %>%
+  tally() %>%
+  filter(n>1)
+
+phen.agree <- phen.traits %>%
+  filter(!AccSpeciesID %in% c(phen.test$AccSpeciesID)) %>%
+  ungroup() %>%
+  # remove unneeded columns
+  dplyr::select(c(AccSpeciesID,lifeHistory))
+
+phen.out <- func.cats %>%
+  mutate(species_name_try = gsub("_"," ",species_name)) %>%
+  # address name inconsistencies
+  mutate(species_name_try = ifelse(species_name_try =="Alchemilla vulgaris","Alchemilla vulgaris agg.",species_name_try)) %>%
+  # join with TRY IDs
+  left_join(spec.in, by=c("species_name_try"="species_name")) %>%
+  dplyr::select(c(species_name:TRYSpeciesID)) %>%
+  rename(PlantGrowthForm=PlantGrowthForm.x) %>%
+  # now add lifespan
+  left_join(phen.agree, by=c("TRYSpeciesID"="AccSpeciesID"))
+
+# look at missing species
+phen.out[is.na(phen.out$lifeHistory),]$TRYSpeciesID
+try.sub <- try.traits %>%
+  filter(AccSpeciesID %in% c(phen.out[is.na(phen.out$lifeHistory),]$TRYSpeciesID),
+         TraitID %in% c(59,343))
+# write.csv(try.sub, "processed_data/species_lookup/try_phen_temp.csv",row.names=FALSE)
+
+### now ht
+
+ht.traits <- try.traits %>%
+  filter(TraitName=="Plant height vegetative") %>%
+  ungroup() %>%
+  mutate(OrigValueStr = as.numeric(OrigValueStr)) %>%
+  group_by(AccSpeciesID,AccSpeciesName,TraitName,OriglName,OrigUnitStr) %>%
+  # add multiplier for units
+  mutate(unit_mult = ifelse(OrigUnitStr=="m",1,
+                            ifelse(OrigUnitStr %in% c("cm","(cm)"," cm"),0.01,
+                                   ifelse(OrigUnitStr=="mm",0.001,NA))),
+         new_value = unit_mult*OrigValueStr,
+         ht_cat = ifelse(new_value<=0.5,"short",
+                         ifelse(new_value>0.5,"tall",NA))) %>%
+                       # ifelse(new_value>0.5 & new_value<=2.0,"tall",
+                              # ifelse(new_value>2.0,"very_tall",NA)))) %>%
+  filter(!is.na(ht_cat)) %>%
+  ungroup() %>%
+  group_by(AccSpeciesID,AccSpeciesName,TraitName,ht_cat) %>%
+  tally() %>%
+  slice_max(n,with_ties=TRUE)
+
+# any species with contrasting entries
+ht.test <- ht.traits %>%
+  group_by(AccSpeciesID,AccSpeciesName) %>%
+  tally() %>%
+  filter(n>1)
+
+ht.agree <- ht.traits %>%
+  filter(!AccSpeciesID %in% c(ht.test$AccSpeciesID)) %>%
+  ungroup() %>%
+  # remove unneeded columns
+  dplyr::select(c(AccSpeciesID,ht_cat))
+
+
+ht.out <- phen.out %>%
+  # now add ht
+  left_join(ht.agree, by=c("TRYSpeciesID"="AccSpeciesID"))
+
+# look at missing species
+ht.out[is.na(ht.out$ht_cat),]$TRYSpeciesID
+try.sub2 <- try.traits %>%
+  filter(AccSpeciesID %in% c(ht.out[is.na(ht.out$ht_cat),]$TRYSpeciesID),
+         TraitID %in% c(3106)) 
+# write.csv(try.sub2, "processed_data/species_lookup/try_ht_temp.csv",row.names=FALSE)
+
+# current groups
+func.secondck <- ht.out %>%
+  mutate(n_species=1) %>%
+  group_by(PlantGrowthForm,licht_cat,temp_cat,lifeHistory,ht_cat) %>%
+  summarise(across(c(cover,pres,n_species),~sum(.)))
+
+### write out func groups for correcting
+# write.csv(ht.out, "processed_data/species_lookup/pft_cats_orig.csv",row.names=FALSE)
+
+# ### get IDs for TRY data request, done
+# try.ids <- veg.in %>% 
+#   # join to ellenberg lookup names
+#   mutate(species_name_model = gsub("_"," ",species_name)) %>%
+#   left_join(ellen.names, by=c("species_name_model"="species_name_new")) %>%
+#   # remove unneeded name columns
+#   # join to ellenberg indicators
+#   left_join(ellen.in, by=c("species_name_ellenberg"="species_name","TRYSpeciesID","TRYSpeciesName")) %>%
+#   group_by(TRYSpeciesID,TRYSpeciesName) %>%
+#   slice(1) # 422
+# paste(list(unique(try.ids$TRYSpeciesID)),sep=",")
+
+### read back in func groups
+func.fin <- read.xlsx("processed_data/species_lookup/pft_cats.xlsx", sheet="pft_cats")
+
+# exhaustive set, too many pfts
+func.exh <- func.fin %>%
+  mutate(n_species=1) %>%
+  group_by(PlantGrowthForm,licht_cat,temp_cat,lifeHistory,ht_cat) %>%
+  summarise(across(c(cover,pres,n_species),~sum(.))) %>%
+  filter(!is.na(licht_cat))
+func.exh
+
+func.htphen <- func.fin %>%
+  mutate(n_species=1) %>%
+  group_by(PlantGrowthForm,lifeHistory,ht_cat) %>%
+  summarise(across(c(cover,pres,n_species), ~sum(.))) %>%
+  filter(!is.na(ht_cat))
+func.htphen 
+
+func.htsub <- func.fin %>%
+  filter(species_name %in% c(red.pres$species_name)) %>%
+  mutate(n_species=1) %>%
+  group_by(PlantGrowthForm,lifeHistory,ht_cat) %>%
+  summarise(across(c(cover,pres,n_species), ~sum(.)))
+func.htsub # unbalanced
+
+func.fullsub <- func.fin %>%
+  filter(species_name %in% c(red.pres$species_name)) %>%
+  mutate(n_species=1) %>%
+  group_by(PlantGrowthForm,lifeHistory,ht_cat,licht_cat,temp_cat) %>%
+  summarise(across(c(cover,pres,n_species), ~sum(.)))
+
+func.finsub <- func.fin %>%
+  filter(species_name %in% c(red.pres$species_name)) %>%
+  mutate(n_species=1) %>%
+  # put nas into indiff cats
+  mutate(licht_cat = ifelse(is.na(licht_cat),"shade-tol-indiff",licht_cat),
+         temp_cat = ifelse(is.na(temp_cat),"indiff",temp_cat)) %>%
+  group_by(ht_cat,licht_cat,temp_cat) %>%
+  summarise(across(c(cover,pres,n_species), ~sum(.)))
+
+func.finsub # 12 PFTs, all with at least 6 and less than 50 species, based on expected response to environmental drivers and categorized by relevant attribute for competition with tree seedlings (height)
+
+# final pfts, with simple names and species lookup
+pft.sp <- func.fin %>%
+  # remove unneeded columns
+  dplyr::select(-c(TRYSpeciesID,Comments)) %>%
+  # put nas into indiff cats, not needed so leave these out for now
+  # mutate(licht_cat = ifelse(is.na(licht_cat),"shade-tol-indiff",licht_cat),
+  #        temp_cat = ifelse(is.na(temp_cat),"indiff",temp_cat)) %>%
+  # add shorthand pft names
+  mutate(pft1 = ifelse(licht_cat=="light-pref","light",
+                       ifelse(licht_cat=="shade-tol-indiff","shade",NA)),
+         pft2 = ifelse(temp_cat=="indiff","notemp",
+                       ifelse(temp_cat=="subalpine-alpine","cold",
+                              ifelse(temp_cat=="submontane-montane","warm",NA)))) %>%
+  mutate(pft = paste(ht_cat,pft1,pft2,sep="-")) %>%
+  dplyr::select(-c(pft1,pft2))
+
+### write commented out for Rmd
+# write.csv(pft.sp, "processed_data/species_lookup/full_pft_categories.csv",row.names=FALSE)
+
+# final pft cats for paper
+pft.ms <- func.fin %>%
+  filter(pres>=5) %>%
+  filter(!grepl("spec.",species_name,fixed=TRUE)) %>%
+  # remove unneeded columns
+  dplyr::select(-c(TRYSpeciesID,Comments)) %>%
+  # put nas into indiff cats, not needed so leave these out for now
+  # mutate(licht_cat = ifelse(is.na(licht_cat),"shade-tol-indiff",licht_cat),
+  #        temp_cat = ifelse(is.na(temp_cat),"indiff",temp_cat)) %>%
+  # add shorthand pft names
+  mutate(pft1 = ifelse(licht_cat=="light-pref","light",
+                       ifelse(licht_cat=="shade-tol-indiff","shade",NA)),
+         pft2 = ifelse(temp_cat=="indiff","notemp",
+                       ifelse(temp_cat=="subalpine-alpine","cold",
+                              ifelse(temp_cat=="submontane-montane","warm",NA)))) %>%
+  mutate(prevalence = pres/150,
+         pft = paste(pft1,pft2,sep="-")) %>%
+  filter(species_name %in% c(veg.sub$species_name)) %>%
+  dplyr::select(-c(pft1,pft2,cover,pres,licht_cat,temp_cat,lifeHistory,ht_cat))
+
+### write commented out for Rmd
+# write.csv(pft.ms, "processed_data/species_lookup/final_pft_categories_ms.csv",row.names=FALSE)
+
+
+```

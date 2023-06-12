@@ -1,0 +1,25 @@
+# files not to be tracked
+*.DS_Store
+*.ini
+.Rproj.user
+*.Rproj
+.Rhistory
+.RData
+.Ruserdata
+
+# folders not to be tracked
+iland/*
+iland/scripts/*
+iland_exe/*
+processed_data/*
+processed_data/iland_sdm_predictions/*
+processed_data/iland_sdm_predictions/future_prediction_summaries/*
+
+# exceptions for some files and scripts
+!iland/scripts/
+!iland/scripts/*.R
+!iland/scripts/*.js
+!processed_data/iland_sdm_predictions/
+!processed_data/iland_sdm_predictions/response_rasters.tif
+!processed_data/iland_sdm_predictions/future_prediction_summaries/
+!processed_data/iland_sdm_predictions/future_prediction_summaries/scenario_mean_cv.csv

@@ -1,0 +1,374 @@
+---
+title: "Evaluate iLand simulation runs"
+author: "Kristin Braziunas"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = '../')
+```
+
+```{r preface, warning=FALSE, message=FALSE}
+#####
+# 
+## Step 7: Evaluate iLand runs, changes in drivers and disturbance
+#
+#####
+
+### load libraries
+
+library(tidyverse)
+library(purrr)
+library(RSQLite)
+
+### wd is one level up, recommend set up Rproj or:
+# setwd("../")
+
+### selected sessionInfo()
+# R version 4.1.3 (2022-03-10)
+# Platform: x86_64-w64-mingw32/x64 (64-bit)
+# Running under: Windows 10 x64 (build 17763)
+# 
+# attached base packages:
+#   [1] stats     graphics  grDevices utils     datasets  methods   base     
+# 
+# other attached packages:
+#   [1] RSQLite_2.2.10  forcats_0.5.1   stringr_1.4.1   dplyr_1.0.8     purrr_0.3.4     readr_2.1.2     tidyr_1.2.0    
+# [8] tibble_3.1.6    ggplot2_3.3.5   tidyverse_1.3.1
+```
+
+```{r section-1, eval=FALSE}
+
+###################
+######### SECTION 1: skip if already processed
+###################
+
+###
+# 0. prep climate data
+###
+
+### climate over time
+list.files("iland/database/", pattern="rcp", full.names=TRUE)
+
+for(i in list.files("iland/database/", pattern="rcp", full.names=FALSE)) {
+  print(i)
+
+  gcm_name <- as.data.frame(i) %>%
+    separate(i, into=c("gcm","suff"), sep="[.]")
+
+  # climate from iland BGD: monthly
+  conn <-
+    DBI::dbConnect(RSQLite::SQLite(),
+                   dbname = paste0("iland/database/",i)) # connect to the db
+  dbListTables(conn)
+
+  clim.out <- data.frame()
+
+  for(i in 1:length(dbListTables(conn))) {
+    print(dbListTables(conn)[i])
+
+    table.in <- dbListTables(conn)[i]
+
+    # previously identified climate tables with missing data
+    if(table.in %in% c("climate118","climate296","climate492","climate770","climate786")) next
+
+    # read and summarize climate normals
+    clim.in <- tbl(conn, table.in) %>%
+      # filter(year>=2011 & year<=2020) %>%
+      mutate(table_name = table.in) %>%
+      mutate(mean_temp = (min_temp + max_temp)/2) %>%
+      # monthly values
+      group_by(table_name,year, month) %>%
+      summarise(mean_temp = mean(mean_temp),min_temp = mean(min_temp), max_temp=mean(max_temp), prec=sum(prec)) %>%
+      collect()
+
+    clim.out <- rbind(clim.out,clim.in)
+  }
+
+  dbDisconnect(conn) # close the connection
+
+  clim.ann <- clim.out %>%
+    ungroup() %>%
+    group_by(table_name,year) %>%
+    summarise(mean_temp = mean(mean_temp),
+              ann_prec = sum(prec))
+
+  clim.summ <- clim.out %>%
+    filter(month %in% c(6:8)) %>%
+    ungroup() %>%
+    group_by(table_name,year) %>%
+    summarise(summ_prec = sum(prec))
+
+  clim.comb <- clim.ann %>%
+    left_join(clim.summ, by=c("table_name","year"))
+
+  write.csv(clim.comb, paste0("processed_data/iland_clim_soils/climate_future_",gcm_name$gcm,".csv"), row.names=FALSE)
+
+}
+```
+
+```{r section-2, warning=FALSE, message=FALSE}
+
+###################
+######### SECTION 2: evaluate iLand runs
+###################
+
+###
+# 1. load data
+###
+
+### now read climate in
+# list.files("processed_data/iland_clim_soils/", pattern="climate_future", full.names=TRUE)
+
+clim.in <- setNames(
+  list.files("processed_data/iland_clim_soils/", pattern="climate_future", full.names=TRUE), 
+  list.files("processed_data/iland_clim_soils/", pattern="climate_future")) %>%
+  map_dfr(read.csv, .id = "run_id") %>%
+  separate(run_id, into=c("pref1","pref2","gcm","rcp","gcm2","gcm3"), sep="_") %>%
+  dplyr::select(-c(pref1,pref2,gcm2,gcm3))
+
+### beetles
+# list.files("iland/output/combined_outputs/", pattern="beetle", full.names=TRUE)
+
+beetle.in <- setNames(
+  list.files("iland/output/combined_outputs/", pattern="beetle", full.names=TRUE), 
+  list.files("iland/output/combined_outputs/", pattern="beetle")) %>%
+  map_dfr(read.csv, .id = "run_id") %>%
+  separate(run_id, into=c("gcm","rcp","gcm2","gcm3","wind_speed","rep","output"), sep="_") %>%
+  dplyr::select(-c(gcm2,gcm3,output))
+  
+### wind
+# list.files("iland/output/combined_outputs/", pattern="wind", full.names=TRUE)
+
+wind.in <- setNames(
+  list.files("iland/output/combined_outputs/", pattern="wind", full.names=TRUE), 
+  list.files("iland/output/combined_outputs/", pattern="wind")) %>%
+  map_dfr(read.csv, .id = "run_id") %>%
+  separate(run_id, into=c("gcm","rcp","gcm2","gcm3","wind_speed","rep","output"), sep="_") %>%
+  dplyr::select(-c(gcm2,gcm3,output))
+
+### landscape
+# list.files("iland/output/combined_outputs/", pattern="landscape", full.names=TRUE)
+
+land.in <- setNames(
+  list.files("iland/output/combined_outputs/", pattern="landscape", full.names=TRUE), 
+  list.files("iland/output/combined_outputs/", pattern="landscape")) %>%
+  map_dfr(read.csv, .id = "run_id") %>%
+  separate(run_id, into=c("gcm","rcp","gcm2","gcm3","wind_speed","rep","output"), sep="_") %>%
+  dplyr::select(-c(gcm2,gcm3,output))
+
+###
+# 2. assess general trends in iland runs
+###
+
+### climate: should warmer with contrasts between temp in RCPs and precip in GCMs
+clim.in %>%
+  pivot_longer(c(mean_temp:summ_prec)) %>%
+  mutate(clim_scen = paste(gcm,rcp,sep="_")) %>%
+  group_by(clim_scen,year,name) %>%
+  summarise(value=mean(value)) %>%
+  ggplot(aes(x=year,y=value, group=clim_scen, color=clim_scen,fill=clim_scen)) +
+  facet_wrap(~name, scales="free_y") +
+  geom_smooth(method="loess") +
+  # stat_summary(fun="mean",geom="line",size=1) +
+  # stat_summary(fun.min="min",fun.max="max",geom="ribbon", alpha=0.2, color=NA) +
+  theme_bw()
+
+# average temp change 2020 to 2100, similar between gcms
+clim.in %>%
+  filter(year%in% c(2000:2009,2091:2100)) %>%
+  mutate(decade = floor(year/10)) %>%
+  group_by(decade) %>%
+  summarise(across(c(mean_temp),mean)) %>%
+  pivot_wider(names_from=decade,values_from=mean_temp) %>%
+  mutate(change = `209`-`200`)
+
+# average summer precip change 2020 to 2100, differs between gcms
+clim.in %>%
+  filter(year%in% c(2000:2009,2091:2100)) %>%
+  mutate(decade = floor(year/10)) %>%
+  group_by(decade,gcm) %>%
+  summarise(across(c(summ_prec),mean))  %>%
+  pivot_wider(names_from=decade,values_from=summ_prec) %>%
+  mutate(change = `209`-`200`)
+
+### beetles: assume should be slightly affected by wind speed (more infested/killed with more wind)
+beetle.in %>%
+  ggplot(aes(x=year,y=infestedArea_ha, group=rep, color=rep, fill=rep)) +
+  facet_grid(gcm~wind_speed) +
+  geom_line() +
+  theme_bw() # check that reps are different
+
+beetle.in %>%
+  ggplot(aes(x=year,y=infestedArea_ha, group=wind_speed, color=wind_speed, fill=wind_speed)) +
+  facet_grid(~gcm) +
+  # geom_line() +
+  stat_summary(fun="mean",geom="line",size=1) +
+  stat_summary(fun.min="min",fun.max="max",geom="ribbon", alpha=0.2, color=NA) +
+  theme_bw()
+
+beetle.in %>%
+  ggplot(aes(x=year,y=killedBasalArea, group=wind_speed, color=wind_speed, fill=wind_speed)) +
+  facet_grid(~gcm) +
+  # geom_line() +
+  stat_summary(fun="mean",geom="line",size=1) +
+  stat_summary(fun.min="min",fun.max="max",geom="ribbon", alpha=0.2, color=NA) +
+  theme_bw()
+
+### wind: should have greater area affected, greater speed, greater impact when higher speed
+# first add 0s, note this requires complete set of reps to be run
+wind.complete <- complete(wind.in, gcm, rcp,wind_speed,rep,year=1:80, fill=list(area_ha=0,killedBasalArea=0,killedVolume=0))
+
+wind.complete %>%
+  ggplot(aes(x=year,y=area_ha, group=rep, color=rep, fill=rep)) +
+  facet_grid(gcm~wind_speed) +
+  geom_line() +
+  theme_bw() # check that reps are different
+
+# higher speed
+wind.in %>%
+  ggplot(aes(x=year,y=windspeed_ms, group=wind_speed, color=wind_speed, fill=wind_speed)) +
+  facet_grid(~gcm) +
+  # geom_line() +
+  stat_summary(fun="mean", fun.min="min",fun.max="max",geom="pointrange") +
+  # stat_summary(fun.min="min",fun.max="max",geom="ribbon", alpha=0.2, color=NA) +
+  theme_bw()
+
+# greater area affected
+wind.complete %>%
+# wind.in %>%
+  ggplot(aes(x=year,y=area_ha, group=wind_speed, color=wind_speed, fill=wind_speed)) +
+  facet_grid(~gcm) +
+  # geom_line() +
+  stat_summary(fun="mean", geom="line", size=1) +
+  stat_summary(fun.min="min",fun.max="max",geom="ribbon", alpha=0.2, color=NA) +
+  theme_bw()
+
+# greater killed ba
+wind.complete %>%
+# wind.in %>%
+  ggplot(aes(x=year,y=killedBasalArea, group=wind_speed, color=wind_speed, fill=wind_speed)) +
+  facet_grid(~gcm) +
+  # geom_line() +
+  stat_summary(fun="mean", geom="line", size=1) +
+  stat_summary(fun.min="min",fun.max="max",geom="ribbon", alpha=0.2, color=NA) +
+  theme_bw()
+
+# wind.complete %>%
+#   # wind.in %>%
+#   ggplot(aes(x=year,y=killedVolume, group=wind_speed, color=wind_speed, fill=wind_speed)) +
+#   facet_grid(~gcm) +
+#   # geom_line() +
+#   stat_summary(fun="mean", geom="line", size=1) +
+#   stat_summary(fun.min="min",fun.max="max",geom="ribbon", alpha=0.2, color=NA) +
+#   theme_bw()
+
+# combined effect of disturbances
+beetle.sub <- beetle.in %>%
+  dplyr::select(c(gcm,rcp,wind_speed,rep,killedBasalArea,killedVolume)) %>%
+  mutate(disturbance="beetle")
+
+dist.sub <- wind.in %>%
+  dplyr::select(c(gcm,rcp,wind_speed,rep,killedBasalArea,killedVolume)) %>%
+  mutate(disturbance="wind") %>%
+  rbind(beetle.sub) %>%
+  group_by(gcm,rcp,wind_speed,rep,disturbance) %>%
+  summarise(across(c(killedBasalArea,killedVolume),~sum(.))) %>%
+  ungroup() %>%
+  group_by(rcp,wind_speed,disturbance) %>%
+  # divide by length(unique(beetle.in$year)) to get average per year
+  summarise(across(c(killedBasalArea,killedVolume),~mean(./length(unique(beetle.in$year))))) %>%
+  mutate(scen=paste(rcp,wind_speed, sep="_"))
+
+dist.sub %>%
+  # mutate(disturbance=factor(disturbance,levels=c("wind","beetle"))) %>%
+  ggplot(aes(x=scen, y=killedBasalArea, fill=disturbance)) +
+  geom_bar(stat="identity") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle=45,vjust=1,hjust=1),
+    axis.title.x = element_blank()
+  )
+
+# comparison between these scenarios
+dist.sub %>%
+  ungroup() %>%
+  group_by(rcp,wind_speed) %>%
+  summarise(killedBasalArea = sum(killedBasalArea)) %>%
+  pivot_wider(names_from = "wind_speed",values_from = "killedBasalArea") %>%
+  mutate(diff = `15`/`0`,
+         rel_diff = (`15`-`0`)/`0`)
+# nearly 1.5 x higher, or 48% increase in disturbed BA
+
+# dist.sub %>%
+#   # mutate(disturbance=factor(disturbance,levels=c("wind","beetle"))) %>%
+#   ggplot(aes(x=scen, y=killedVolume, fill=disturbance)) +
+#   geom_bar(stat="identity") +
+#   theme_bw() +
+#   theme(
+#     axis.text.x = element_text(angle=45,vjust=1,hjust=1),
+#     axis.title.x = element_blank()
+#   )
+
+### landscape
+land.in %>%
+  group_by(gcm,rcp,wind_speed,rep,year) %>%
+  summarise(basal_area_m2=sum(basal_area_m2),
+            count_ha_total = sum(count_ha),
+            dbh_avg_cm = weighted.mean(dbh_avg_cm,count_ha),
+            height_avg_m = weighted.mean(height_avg_m, count_ha)) %>%
+  mutate(clim_dist_scen = paste(rcp,wind_speed,sep="_")) %>%
+  pivot_longer(c(basal_area_m2:height_avg_m)) %>%
+  ggplot(aes(x=year,y=value, group=clim_dist_scen, color=clim_dist_scen, fill=clim_dist_scen)) +
+  facet_wrap(~name, scales="free") +
+  # geom_line() +
+  stat_summary(fun="mean",geom="line",size=1) +
+  stat_summary(fun.min="min",fun.max="max",geom="ribbon", alpha=0.2, color=NA) +
+  theme_bw()
+# with more wind: lower BA, more small trees
+
+ba.prep <- land.in %>%
+  group_by(gcm,rcp,wind_speed,rep,year) %>%
+  summarise(basal_area_m2=sum(basal_area_m2)) %>%
+  ungroup() %>%
+  filter(year==80) %>%
+  group_by(year) %>%
+  summarise(min=min(basal_area_m2),max=max(basal_area_m2))
+
+(max(ba.prep$max)-27.2)/27.2
+(min(ba.prep$min)-27.2)/27.2
+
+# by species
+land.in %>%
+  mutate(clim_dist_scen = paste(rcp,wind_speed,sep="_")) %>%
+  filter(species %in% c("piab","fasy","lade","acps","pisy","soau")) %>%
+  ggplot(aes(x=year,y=count_ha, group=clim_dist_scen, color=clim_dist_scen, fill=clim_dist_scen)) +
+  facet_wrap(~species) +
+  # geom_line() +
+  stat_summary(fun="mean",geom="line",size=1) +
+  stat_summary(fun.min="min",fun.max="max",geom="ribbon", alpha=0.2, color=NA) +
+  theme_bw()
+
+land.in %>%
+  mutate(clim_dist_scen = paste(rcp,wind_speed,sep="_")) %>%
+  filter(species %in% c("piab","fasy","lade","acps","pisy","soau")) %>%
+  ggplot(aes(x=year,y=basal_area_m2, group=clim_dist_scen, color=clim_dist_scen, fill=clim_dist_scen)) +
+  facet_wrap(~species) +
+  # geom_line() +
+  stat_summary(fun="mean",geom="line",size=1) +
+  stat_summary(fun.min="min",fun.max="max",geom="ribbon", alpha=0.2, color=NA) +
+  theme_bw()
+
+# all species
+land.in %>%
+  mutate(clim_dist_scen = paste(rcp,wind_speed,sep="_")) %>%
+  # filter(species %in% c("piab","fasy","lade","acps","pisy","soau")) %>%
+  ggplot(aes(x=year,y=basal_area_m2, group=clim_dist_scen, color=clim_dist_scen, fill=clim_dist_scen)) +
+  facet_wrap(~species) +
+  # geom_line() +
+  stat_summary(fun="mean",geom="line",size=1) +
+  stat_summary(fun.min="min",fun.max="max",geom="ribbon", alpha=0.2, color=NA) +
+  theme_bw()
+```
+

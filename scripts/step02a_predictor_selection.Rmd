@@ -1,0 +1,597 @@
+---
+title: "Select model predictors"
+author: "Kristin Braziunas"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = '../')
+```
+
+```{r full-script, warning=FALSE, message=FALSE}
+#####
+# 
+## Step 2a: Select model predictors
+#
+#####
+
+### purpose
+# select predictors of understory cover and presence
+# assess and address collinearity, need for predictor transformations
+
+### libraries
+library(tidyverse)
+library(openxlsx)
+library(RSQLite)
+library(sp)
+library(sf)
+library(raster)
+library(corrplot)
+library(ggpubr)
+library(Hmisc) # weighted mean, sd, quantile
+library(hutilscpp) # cumsum_reset and which_first
+
+### wd is one level up, recommend set up Rproj or:
+# setwd("../")
+
+### selected sessionInfo()
+# R version 4.1.3 (2022-03-10)
+# Platform: x86_64-w64-mingw32/x64 (64-bit)
+# Running under: Windows 10 x64 (build 17763)
+# 
+# attached base packages:
+#   [1] stats     graphics  grDevices utils     datasets  methods   base     
+# 
+# other attached packages:
+#   [1] hutilscpp_0.9.2 Hmisc_4.7-0     Formula_1.2-4   survival_3.2-13 lattice_0.20-45
+# [6] ggpubr_0.4.0    corrplot_0.92   raster_3.6-3    sf_1.0-8        sp_1.5-0       
+# [11] RSQLite_2.2.10  openxlsx_4.2.5  forcats_0.5.1   stringr_1.4.1   dplyr_1.0.8    
+# [16] purrr_0.3.4     readr_2.1.2     tidyr_1.2.0     tibble_3.1.6    ggplot2_3.3.5  
+# [21] tidyverse_1.3.1
+
+###
+# 0. climate predictor prep 
+###
+
+### commented out after first run to avoid rerunning
+
+# # climate from iland BGD
+# conn <-
+#   DBI::dbConnect(RSQLite::SQLite(),
+#                  dbname = paste0("data/iland_inputs/historic_climate.sqlite")) # connect to the db
+# dbListTables(conn)
+# 
+# clim.out <- data.frame()
+# 
+# for(i in 1:length(dbListTables(conn))) {
+#   print(dbListTables(conn)[i])
+# 
+#   table.in <- dbListTables(conn)[i]
+# 
+#   # read and summarize annual climate
+#   clim.in <- tbl(conn, table.in) %>%
+#     mutate(table_name = table.in) %>%
+#     mutate(mean_temp = (min_temp + max_temp)/2,
+#            daily_range = max_temp-min_temp,
+#            # frost days when temp goes below 0
+#            frost_day = ifelse(min_temp<0,1,0),
+#            # frost events when temp goes above and below 0
+#            frost_event = ifelse(min_temp<0 & max_temp>0,1,0),
+#            # gdd as mean temp - 5 if mean_temp is > 5
+#            gdd5 = ifelse(mean_temp>=5, mean_temp-5,0)) %>%
+#     # annual values: mean temp, vpd, rad, total precip
+#     group_by(table_name,year) %>%
+#     summarise(mean_temp = mean(mean_temp),prec=sum(prec),rad=mean(rad),vpd=mean(vpd),daily_range = mean(daily_range),frost_days = sum(frost_day),frost_events=sum(frost_event),gdd5=sum(gdd5)) %>%
+#     collect()
+# 
+#   clim.out <- rbind(clim.out,clim.in)
+# }
+# 
+# dbDisconnect(conn) # close the connection
+# 
+# write.csv(clim.out, "processed_data/iland_clim_soils/climate_historical_annual.csv", row.names=FALSE)
+
+# # growing season values
+# conn <-
+#   DBI::dbConnect(RSQLite::SQLite(),
+#                  dbname = paste0("data/iland_inputs/historic_climate.sqlite")) # connect to the db
+# dbListTables(conn)
+# 
+# clim.out <- data.frame()
+# 
+# for(i in 1:length(dbListTables(conn))) {
+#   print(dbListTables(conn)[i])
+# 
+#   table.in <- dbListTables(conn)[i]
+# 
+#   clim.grow <- tbl(conn, table.in) %>%
+#     mutate(table_name = table.in) %>%
+#     # beginning of growing season: after first span of 6 days with mean_temp>5
+#     # end of growing season: before first span of 6 days with mean_temp<5
+#     mutate(mean_temp = (min_temp + max_temp)/2,
+#            # add flags for beginning and end counters
+#            gs = ifelse(mean_temp>=5,1,0),
+#            gs_opp = ifelse(mean_temp<5,1,0)) %>%
+#     # collect first to use cumsum_reset
+#     collect() %>%
+#     # cumsum to get first span of 6 days
+#     group_by(table_name,year) %>%
+#     # add julian day
+#     mutate(jday = row_number()) %>%
+#     # cumsum days above, days below; reset if interrupted
+#     mutate(gs_begin = hutilscpp::cumsum_reset(gs, x=as.logical(gs)),
+#            gs_end = hutilscpp::cumsum_reset(gs_opp, x=as.logical(gs_opp)))
+# 
+#   gs.begin <- clim.grow %>%
+#     group_by(table_name,year) %>%
+#     slice(which_first(gs_begin>=6)) %>%
+#     # begins on subsequent jday
+#     mutate(gsb = jday+1) %>%
+#     dplyr::select(c(table_name,year,gsb))
+# 
+#   gs.sub <- clim.grow %>%
+#     # after july 1
+#     filter(month>6) %>%
+#     group_by(table_name,year) %>%
+#     slice(which_first(gs_end>=6)) %>%
+#     # ends 6 days prior
+#     mutate(gse = jday-6) %>%
+#     dplyr::select(c(table_name,year,gse)) %>%
+#     # join with begin
+#     left_join(gs.begin, by=c("table_name","year")) %>%
+#     # join with clim.grow
+#     right_join(clim.grow, by=c("table_name","year")) %>%
+#     # filter by jday
+#     filter(jday >=gsb & jday <= gse) %>%
+#     # compute annual values
+#     group_by(table_name,year) %>%
+#     summarise(mean_grow_temp = mean(mean_temp),
+#               max_grow_temp = max(max_temp),
+#               grow_prec = sum(prec),
+#               gsb = mean(gsb),
+#               gse = mean(gse),
+#               gsl = n())
+# 
+#   clim.out <- rbind(clim.out,gs.sub)
+# }
+# 
+# dbDisconnect(conn) # close the connection
+# 
+# write.csv(clim.out, "processed_data/iland_clim_soils/climate_historical_growingSeason.csv", row.names=FALSE)
+
+
+# # climate from iland BGD: monthly
+# conn <-
+#   DBI::dbConnect(RSQLite::SQLite(),
+#                  dbname = paste0("data/iland_inputs/historic_climate.sqlite")) # connect to the db
+# dbListTables(conn)
+# 
+# clim.out <- data.frame()
+# 
+# for(i in 1:length(dbListTables(conn))) {
+#   print(dbListTables(conn)[i])
+# 
+#   table.in <- dbListTables(conn)[i]
+# 
+#   # read and summarize climate normals
+#   clim.in <- tbl(conn, table.in) %>%
+#     mutate(table_name = table.in) %>%
+#     mutate(mean_temp = (min_temp + max_temp)/2) %>%
+#     # monthly values
+#     group_by(table_name,year, month) %>%
+#     summarise(mean_temp = mean(mean_temp),min_temp = mean(min_temp), max_temp=mean(max_temp), prec=sum(prec)) %>%
+#     collect()
+# 
+#   clim.out <- rbind(clim.out,clim.in)
+# }
+# 
+# dbDisconnect(conn) # close the connection
+# 
+# write.csv(clim.out, "processed_data/iland_clim_soils/climate_historical_monthly.csv", row.names=FALSE)
+
+###
+# 1. load data 
+###
+
+# plot info
+plots.in <- read.table("data/BGD/NP_BGD_Biodiv_Alm_study_sites_UTM32.xls", header = TRUE, sep=";") %>%
+  rename(elev_m=elevation,
+         dev_stage=type_ger,
+         plot_id=plot) %>%
+  dplyr::select(-c(tour:longter_year,Kommentar))
+
+# light measurements
+light.in <- read.table("data/BGD/biodivplots_solariscope_16012022.xls", header=TRUE, sep=";") %>%
+  # make plot ids comparable with other dfs
+  mutate(Stichprobenpunkt = toupper(Stichprobenpunkt)) %>%
+  mutate(plot_id = paste0("BGD_BIO_",Stichprobenpunkt))
+
+# climate
+clim.ann <- read.csv("processed_data/iland_clim_soils/climate_historical_annual.csv")
+clim.month <- read.csv("processed_data/iland_clim_soils/climate_historical_monthly.csv")
+clim.grow <- read.csv("processed_data/iland_clim_soils/climate_historical_growingSeason.csv")
+
+# soils from iland
+env.in <- read.table("iland/gis/environment.txt", header=TRUE) %>%
+  dplyr::select(c(id:model.site.pctClay))
+
+# rid grid
+rid.in <- raster("iland/gis/objectid.asc")
+crs(rid.in) <- CRS("+init=epsg:31468")
+
+# tree inventory
+baume.inv4 <- read.csv("data/BGD/tree_data_inv3_4/trees_inv34.csv") %>%
+  filter(inventory==4)
+
+# tree name lookup
+treelookup <- read.csv("processed_data/species_lookup/tree_lookup.csv")
+
+###
+# 2. prep all possible predictors
+###
+
+### light
+# start with: TSF
+light.pred <- light.in %>%
+  # drop unneeded columns
+  dplyr::select(c(plot_id,TSFdec)) %>%
+  # average across all measurements
+  group_by(plot_id) %>%
+  summarise_all(mean)
+
+### climate and soils prep
+# create points from plot centers
+plot.pts <- st_as_sf(plots.in, coords=c("E","N"), crs=25832) %>%
+  st_transform(crs=crs(rid.in)) %>%
+  filter(category=="Wald")
+
+plot(rid.in)
+plot(plot.pts[1], add=TRUE, color="black")
+
+# # write out for study area plot, commented out for Rmd
+# st_write(plot.pts, "processed_data/gis/plot_locations.shp")
+
+# extract rids from raster, join up with plot data
+plot.climsoils <- plot.pts %>%
+  mutate(rid = extract(rid.in, plot.pts)) %>%
+  as.data.frame() %>%
+  dplyr::select(plot_id,rid) %>%
+  left_join(env.in, by=c("rid"="id")) 
+
+### climate
+# using list from chauvier, identified relevant CHELSA variables for predicting plant species distributions in the alps
+# first: calc at monthly resolution
+# - mean daily temp
+# - mean of min daily temp
+# - mean of max daily temp
+# - mean diurnal range
+# - sum precip
+# - mean vpd
+# - number of frost changes (0 is between min and max temp)
+# - growing degree days (sum of mean temp - 5 for all days where mean temp > 5)
+## this is done above
+
+# bio1: mean annual temp
+# bio2: mean diurnal range
+# bio3: isothermality (bio2/bio7)
+# bio4: temperature seasonality (sd of monthly mean temp)
+# bio5: max temp warmest month (mean of daily max temp, warmest month in a year)
+# bio6: min temp coldest month (mean of daily min temp, coldest month in a year)
+# bio7: temp annual range (bio5-bio6)
+# bio10: mean temp warmest quarter (here, using seasonally-based quarters, summer)
+# bio11: mean temp coldest quarter (here, using winter)
+# bio12: annual precip (sum)
+# bio13: precip wettest month
+# bio14: precip driest month
+# bio15: precip seasonality (cv of monthly values)
+# bio18: precip warmest quarter (summer)
+# bio19: precip coldest quarter (winter)
+# bio10m11: summer to winter diff in avg daily mean temp (bio10-bio11)
+# bio13m14: annual precip range (bio13-bio14)
+# bio18m19: summer to winter diff in precip (bio18-bio19)
+# mean rad
+# mean annual vpd
+# fcf: frost change frequency (# days where 0 is between min and max temps)
+# gdd5: growing degree days >5C (mean daily temp - 5, sum across all days with >5C mean temp over a year)
+# omitting additional derived variables including snow, grow season length (combines temp and precip), 
+
+# total # frost days (when min below 0)
+# growing season length (simply defined based on Eur Clim assess, https://cran.r-project.org/web/packages/ClimInd/ClimInd.pdf); 
+# growing season mean temp
+# growing season max temp
+# growing season total prec
+
+# monthly avgs from monthly values (8), includes bio4, bio5, bio6, bio7, bio13, bio14, bio13m14, bio15
+clim.avgmonth <- clim.month %>%
+  # annual values first
+  group_by(table_name,year) %>%
+  summarise(seas_temp = sd(mean_temp),
+            min_month_temp = min(min_temp),
+            max_month_temp = max(max_temp),
+            range_temp = max_month_temp - min_month_temp,
+            wet_month_prec = max(prec),
+            dry_month_prec = min(prec),
+            range_prec = wet_month_prec - dry_month_prec,
+            seas_prec = cv(prec))
+
+# quarter/seasonal values (6), includes bio10, bio11, bio18, bio19, bio10m11, bio18m19
+clim.seas <- clim.month %>%
+  # add season flag
+  mutate(season = ifelse(month %in% c(1,2,12),"winter",
+                         ifelse(month %in% c(3:5),"spring",
+                                ifelse(month %in% c(6:8),"summer",
+                                       ifelse(month %in% c(9:11),"fall",NA))))) %>%
+  # mean temp and precip sums by season
+  group_by(table_name,year,season) %>%
+  summarise(temp = mean(mean_temp), prec=sum(prec)) %>%
+  # pivot so seasons are columns
+  pivot_wider(names_from="season",values_from=c("temp","prec")) %>%
+  rename(summer_temp = temp_summer, winter_temp = temp_winter,
+         summer_prec = prec_summer, winter_prec = prec_winter) %>%
+  mutate(seas_range_temp = summer_temp-winter_temp,
+         seas_range_prec = summer_prec - winter_prec) %>%
+  # remove unneeded values
+  dplyr::select(c(table_name,year,summer_temp,winter_temp,summer_prec,winter_prec,seas_range_temp,seas_range_prec))
+
+# combine with annual values, calculate 10-yr normals
+# annual avgs from daily values (7), includes bio1, bio2, bio12, vpd, fcf, gdd5, rad; also calc isothermality
+clim.pred <- clim.ann %>%
+  # add monthly and seasonal values
+  left_join(clim.avgmonth, by=c("table_name","year")) %>%
+  left_join(clim.seas, by=c("table_name","year")) %>%
+  # join growing season
+  left_join(clim.grow, by=c("table_name","year")) %>%
+  # add isothermality
+  mutate(isotherm = daily_range/range_temp) %>%
+  # most recent decade, 2000-2009
+  filter(year %in% c(2000:2009)) %>%
+  # calc norms
+  dplyr::select(-year) %>%
+  group_by(table_name) %>%
+  summarise_all(mean) %>%
+  right_join(plot.climsoils, by=c("table_name" = "model.climate.tableName")) %>%
+  dplyr::select(plot_id,mean_temp:isotherm)
+
+### soils
+# whc equation
+# code from Werner
+# Calculate water holding capacity following the approach of Schwalm & Ek (2004, Ecol. Mod.)
+# pct_sand, pct_silt, pct_clay: soil texture fractions in %
+# soil_depth: stone-free effective soil depth (mm)
+# fc_threshold: field capacity (J kg-1 or kPa), default: 15kPa
+# pwp_threshold: permanent wilting point (J kg-1 or kPa), default 1500kPa
+# return: water holding capacity (between fc and pwp) in mm
+calcWHC <- function(pct_sand, pct_silt, pct_clay, soil_depth, fc_threshold=15, pwp_threshold=4000) {
+  
+  theta_sat = 0.01 * (50.5 - 0.142*pct_sand - 0.037*pct_clay); # Eq. 78
+  bt <- 11.43 - 0.103*pct_sand - 0.0687*pct_silt # Eq. 79
+  rho_e <- -5.99 + 0.0544*pct_sand + 0.0451*pct_silt # Eq 80
+  
+  
+  fc <- theta_sat * (rho_e / -fc_threshold)^(1/bt) * soil_depth # Eq 76
+  pwp <- theta_sat * (rho_e / -pwp_threshold)^(1/bt) * soil_depth # Eq 77
+  whc <- fc-pwp
+  whc
+}
+
+# calc whc
+soil.pred <- plot.climsoils %>% 
+  mutate(whc = calcWHC(model.site.pctSand,
+                       model.site.pctSilt,
+                       model.site.pctClay,
+                       # convert soil depth from cm to mm
+                       model.site.soilDepth*10)) %>%
+  # also rename soil texture
+  rename(soil_fert = model.site.availableNitrogen,
+         sand = model.site.pctSand,
+         clay = model.site.pctClay,
+         eff_dep = model.site.soilDepth) %>%
+  # select final variables for consideration
+  dplyr::select(c(plot_id, sand, clay, eff_dep, soil_fert, whc))
+
+
+### forest structure and composition
+# which plots have no trees
+baume.inv4 %>%
+  filter(N==0)
+baume.inv4 %>%
+  filter(PlotID %in% c("F062","F079","F108"))
+
+# calc separately with/without trees, otherwise errors
+# formulas for weighted mean and sd, note here we calc frequency mean because N stands for number represented
+# https://en.wikipedia.org/wiki/Weighted_arithmetic_mean#Weighted_sample_variance
+for.trees <- baume.inv4 %>%
+  filter(!PlotID %in% c("F062","F079","F108")) %>%
+  # total BA, density, mean and sd DBH, mean and sd height
+  group_by(PlotID) %>%
+  summarise(tph=sum(N),
+            BA = sum(basal_area*N),
+            mean_dbh = weighted.mean(dbh,N),
+            mean_height = weighted.mean(height,N),
+            sd_dbh = sqrt(wtd.var(dbh,N)),
+            sd_height = sqrt(wtd.var(height,N)),
+            # dominant, 95th percentile height, set to 0 if no trees in plot
+            dom_height = wtd.quantile(height,N, probs=c(0.95))) %>%
+  mutate(plot_id = paste0("BGD_BIO_",PlotID))
+
+for.notrees <- baume.inv4 %>%
+  filter(PlotID %in% c("F062","F079","F108")) %>%
+  # total BA, density, mean and sd DBH, mean and sd height
+  group_by(PlotID) %>%
+  summarise(tph=sum(N),
+            BA = sum(basal_area*N),
+            mean_dbh = 0,
+            mean_height = 0,
+            sd_dbh = 0,
+            sd_height = 0,
+            # dominant, 95th percentile height, set to 0 if no trees in plot
+            dom_height = 0) %>%
+  mutate(plot_id = paste0("BGD_BIO_",PlotID))
+
+for.tots <- for.trees %>%
+  rbind(for.notrees)
+
+# tree richness
+for.rich <- baume.inv4 %>%
+  distinct(PlotID,species) %>%
+  # add counter unless NA
+  mutate(n_species = ifelse(!is.na(species),1,0)) %>%
+  # plot_id for later matching
+  mutate(plot_id = paste0("BGD_BIO_",PlotID)) %>%
+  # sum species richness
+  group_by(plot_id) %>%
+  summarise(tree_richness = sum(n_species))
+
+# compositional categories
+for.leaf <- baume.inv4 %>%
+  left_join(treelookup, by="species") %>%
+  # add no trees category
+  mutate(LeafType=ifelse(is.na(LeafType),"no_trees",LeafType)) %>%
+  # needle v broadleaved
+  group_by(PlotID,LeafType) %>%
+  # sum basal area
+  summarise(BA_sum = sum(basal_area*N)) %>%
+  # join with total
+  left_join(for.tots,by=c("PlotID")) %>%
+  ungroup() %>%
+  # share (prop)
+  mutate(BA_share = BA_sum/BA) %>%
+  # add no trees proportion
+  mutate(BA_share = ifelse(LeafType=="no_trees",1,BA_share),
+         plot_id = paste0("BGD_BIO_",PlotID)) %>% 
+  dplyr::select(plot_id,LeafType,BA_share) %>%
+  pivot_wider(names_from="LeafType",names_prefix="prop_",values_from=BA_share) %>%
+  # first replace all NAs with 0
+  mutate(across(c(prop_needleleaved,prop_broadleaved),~replace_na(.,0))) %>%
+  # put NAs back in if no trees
+  mutate(across(c(prop_needleleaved,prop_broadleaved),~ifelse(is.na(prop_no_trees),.,NA))) %>%
+  dplyr::select(-prop_no_trees)
+
+for.green <- baume.inv4 %>%
+  left_join(treelookup, by="species") %>%
+  # add no trees category
+  mutate(LeafPhenology=ifelse(is.na(LeafPhenology),"no_trees",LeafPhenology)) %>%
+  # deciduous v evergreen
+  group_by(PlotID,LeafPhenology) %>%
+  # sum basal area
+  summarise(BA_sum = sum(basal_area*N)) %>%
+  # join with total
+  left_join(for.tots,by=c("PlotID")) %>%
+  ungroup() %>%
+  # share (prop)
+  mutate(BA_share = BA_sum/BA) %>%
+  # add no trees proportion
+  mutate(BA_share = ifelse(LeafPhenology=="no_trees",1,BA_share),
+         plot_id = paste0("BGD_BIO_",PlotID)) %>%
+  dplyr::select(plot_id,LeafPhenology,BA_share) %>%
+  pivot_wider(names_from="LeafPhenology",names_prefix="prop_",values_from=BA_share) %>%
+  # first replace all NAs with 0
+  mutate(across(c(prop_deciduous,prop_evergreen),~replace_na(.,0))) %>%
+  # put NAs back in if no trees
+  mutate(across(c(prop_deciduous,prop_evergreen),~ifelse(is.na(prop_no_trees),.,NA))) %>%
+  dplyr::select(-prop_no_trees)
+
+# share for specific species
+for.sp <- baume.inv4 %>%
+  left_join(treelookup, by="species") %>%
+  # add no trees category
+  mutate(species_name=ifelse(is.na(species_name),"no_trees",species_name)) %>%
+  # spruce and beech share
+  filter(species_name %in% c("Fagus sylvatica","Picea abies","no_trees")) %>%
+  group_by(PlotID,species_name) %>%
+  # sum basal area
+  summarise(BA_sum = sum(basal_area*N)) %>%
+  # join with total
+  full_join(for.tots,by=c("PlotID")) %>%
+  ungroup() %>%
+  # share (prop)
+  mutate(BA_share = BA_sum/BA) %>%
+  # add no trees proportion
+  mutate(BA_share = ifelse(species_name=="no_trees",1,BA_share),
+         plot_id = paste0("BGD_BIO_",PlotID)) %>%
+  # new names for spruce and beech share
+  mutate(pred_var = ifelse(species_name=="Picea abies","piab",
+                           ifelse(species_name=="Fagus sylvatica","fasy",
+                                  ifelse(species_name=="no_trees","no_trees",NA)))) %>%
+  dplyr::select(plot_id,pred_var,BA_share) %>%
+  pivot_wider(names_from="pred_var",names_prefix="prop_",values_from=BA_share) %>%
+  # first replace all NAs with 0
+  mutate(across(c(prop_piab,prop_fasy),~replace_na(.,0))) %>%
+  # put NAs back in if no trees
+  mutate(across(c(prop_piab,prop_fasy),~ifelse(is.na(prop_no_trees),.,NA))) %>%
+  dplyr::select(-c(prop_NA,prop_no_trees))
+
+
+###
+# 4. join, assess collinearity, choose final predictors
+###
+
+pred.all <- light.pred %>%
+  left_join(clim.pred, by="plot_id") %>%
+  left_join(soil.pred, by="plot_id") %>%
+  left_join(for.tots, by="plot_id") %>%
+  left_join(for.rich, by="plot_id") %>%
+  left_join(for.leaf, by="plot_id") %>%
+  left_join(for.green, by="plot_id") %>%
+  left_join(for.sp, by="plot_id") %>%
+  dplyr::select(-PlotID)
+
+# # write out full version, commented out for Rmd
+# write.csv(pred.all, "processed_data/understory_model/predictors_fullset.csv",row.names=FALSE)
+
+### assess collinearity
+# goal: avoid, abs(r)<0.7
+
+# pearson's rank correlation
+corr.pred <- pred.all %>%
+  dplyr::select(-c(plot_id)) %>%
+  # set proportions to 0 if not present, just for quick corr analysis
+  mutate(across(c(prop_needleleaved:prop_fasy),~replace_na(.,0))) %>%
+  cor(method="pearson")
+
+corrplot(corr.pred, type="upper", diag=FALSE)
+
+corr.abs <- abs(corr.pred)
+
+### go through by predictor group
+# climate: interested in effect of temp change, so priority is to keep temp but also retain different vars that may change in diff ways (e.g., prec) and are relevant to ecological processes (e.g., frost, gdd)
+# many climate vars highly correlated; mean_temp r > 0.99 with gdd, seasonal/growing season temp, frost days and r > 0.95 for ann precip, seasonal precip, vpd, highly corr r > 0.7 with 21 climate vars
+# keep mean_temp means dropping a bunch of climate vars (including frost, gdd, growing season temp vars...) and dropping elevation. remaining: summer_prec, isothermality, dry_month_prec, seas_range_prec, rad
+# next keep summer_prec as physiologically meaningful. kicks out: dry_month_prec, wet_month_prec, range_prec
+# next keep: isothermality, seas_range_prec, rad
+# top/remaining 5 for hx dataset were: mean_temp, summer_prec, isothermality, seas_range_prec, rad
+
+# forest:
+# keep TSFdec, BA, tph
+# dom_ht correlated with mean_ht, keep dom_ht
+# keep mean_dbh
+# SD_dbh and SD_height correlated, keep SD_height because less duplicative of mean_dbh
+# keep richness
+# all of the composition/BA_share predictors are highly correlated with each other, keeping prop_evergreen and prop_fasy, which are correlated with each other at ~0.5
+
+# site: 
+# not considering slope, aspect because not going to align well with iland variables, distal predictors, resolution mismatch, also slope does not encompass the full range of variation
+# drop elev_m, highly correlated with climate, retain climate predictors
+# clay highly correlated with sand
+# eff_dep highly with whc
+# keep whc, sand, soil_fert
+
+### to retain 
+# mean_temp, isotherm, summer_prec, seas_range_prec, rad
+# TSFdec, BA, tph, dom_height, mean_dbh, sd_height, tree_richness, prop_evergreen, prop_fasy
+# sand, whc, soil_fert
+
+###
+# 5. output predictors
+###
+
+### final output predictors
+pred.fin <- pred.all %>%
+  dplyr::select(c("plot_id","mean_temp","summer_prec","rad","TSFdec","BA","prop_fasy","sand","whc","soil_fert"))
+
+# # write out, commented out for Rmd
+# write.csv(pred.fin, "processed_data/understory_model/predictors_subset.csv",row.names=FALSE)
+
+
+```

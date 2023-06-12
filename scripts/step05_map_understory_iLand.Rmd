@@ -1,0 +1,731 @@
+---
+title: "Map understory from iLand inputs"
+author: "Kristin Braziunas"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = '../')
+```
+
+```{r step-1, warning=FALSE, message=FALSE}
+#####
+# 
+## Step 5: Extract variables from iLand and map understory communities
+#
+#####
+
+# if running on server
+# write("TMP = 'temp''", file = file.path('~/.Renviron'))
+
+### load libraries
+library(tidyverse)
+library(sp)
+library(terra)
+library(RSQLite)
+library(dbplyr)
+library(randomForest)
+library(openxlsx)
+
+# running in parallel
+library(parallel)
+library(foreach) 
+library(doParallel) 
+
+### wd is one level up, recommend set up Rproj or:
+# setwd("../")
+
+### selected sessionInfo()
+# R version 4.1.3 (2022-03-10)
+# Platform: x86_64-w64-mingw32/x64 (64-bit)
+# Running under: Windows 10 x64 (build 17763)
+# 
+# attached base packages:
+#   [1] stats     graphics  grDevices utils     datasets  methods   base     
+# 
+# other attached packages:
+#   [1] doParallel_1.0.17  iterators_1.0.14   foreach_1.5.2      openxlsx_4.2.5     randomForest_4.7-1 dbplyr_2.1.1      
+# [7] RSQLite_2.2.10     terra_1.6-17       sp_1.5-0           forcats_0.5.1      stringr_1.4.1      dplyr_1.0.8       
+# [13] purrr_0.3.4        readr_2.1.2        tidyr_1.2.0        tibble_3.1.6       ggplot2_3.3.5      tidyverse_1.3.1   
+
+###################
+######### SECTION 1: skip if already created csvs with predictors at relevant resolution
+###################
+
+###
+# 1. import lif data 
+###
+
+# standgrid for masking
+grid.in <- rast("iland/gis/standgrid.asc")
+crs(grid.in) <- "epsg:31468"
+
+# remove seedbelt and classify rest as 1
+grid.noseed <- classify(grid.in, matrix(c(-Inf,0,NA,1,Inf,1),ncol=3,byrow=TRUE))
+
+### lif at 2m height
+lif <- rast("iland/output/lif_baseline2020.asc")
+crs(lif) <- crs(grid.in)
+
+# mask
+lif.mask <- crop(lif,grid.noseed)*grid.noseed
+
+plot(lif.mask)
+
+###
+# 2. import iland tree outputs
+###
+
+conn=DBI::dbConnect(RSQLite::SQLite(), dbname = paste0("iland/output/baseline2020.sqlite")) # connect to the db
+dbListTables(conn)
+
+# tree output, initial filtering
+trees.in <-  tbl(conn, "tree") %>%
+  filter(year==0) %>%
+  dplyr::select(c(ru,rid,species,id,x,y,dbh,height,basalArea)) %>%
+  mutate(x_crs = x + 4559008, y_crs = y+5260630) %>%
+  collect()
+
+summary(trees.in)
+
+dbDisconnect(conn) # close the connection
+
+###
+# 3. create ids for 10m cells, match up with tree data 
+###
+
+# create copy of raster with unique ids, mask to same grid
+id.rast <- rast(crs=crs(grid.noseed), extent=ext(grid.noseed), resolution=res(grid.noseed), vals=c(1:ncell(grid.noseed))) * grid.noseed
+
+### comment out for Rmd
+# writeRaster(id.rast, "processed_data/iland_sdm_predictions/stand_id_raster.tif", overwrite=TRUE)
+
+trees.pts <- vect(trees.in, geom=c("x_crs","y_crs"), crs=crs(id.rast))
+
+# extract raster ids
+trees.in$cell_id <- extract(id.rast, trees.pts)[,2]
+
+rm(trees.pts)
+gc()
+
+# # how many trees per 10m cell: 1-36, mean 4.4
+# trees.in %>%
+#   group_by(cell_id) %>%
+#   tally() %>% summary()
+
+###
+# 4. summarize predictor variables of interest at 10m resolution
+###
+
+### light
+
+lif.pred <- values(c(lif.mask,id.rast)) %>%
+  as.data.frame() %>%
+  rename(lif = lif_baseline2020, cell_id=lyr.1) %>%
+  filter(!is.na(lif))
+
+### forest structure
+unique(trees.in$species)
+# evergreen: "piab", "abal", "pisy","psme","pini","pice","pimu"
+# not evergreen: "lade","fasy","quro","acps","frex","cabe","bepe","alin","qupe","algl","casa","acca","acpl","qupu","soau","soar","coav","alvi","potr","poni","tico","tipl","ulgl","saca","rops"
+
+head(trees.in)
+
+# structure
+trees.struct <- trees.in %>%
+  group_by(cell_id) %>%
+  # basal area
+  summarise(BA = sum(basalArea),
+            # dominant height
+            dom_height = quantile(height, probs=c(0.95)))
+
+# composition
+trees.comp <- trees.in %>%
+  # assign identifiers to evergreen
+  # no trailing NAs, good
+  mutate(evergreen = ifelse(species %in% c("piab", "abal", "pisy","psme","pini","pice","pimu"),1,
+                            ifelse(species %in% c("lade","fasy","quro","acps","frex","cabe","bepe","alin","qupe","algl","casa","acca","acpl","qupu","soau","soar","coav","alvi","potr","poni","tico","tipl","ulgl","saca","rops"),0,NA))) %>%
+  group_by(cell_id,species,evergreen) %>%
+  # BA by species
+  summarise(BA_spec = sum(basalArea)) %>%
+  # add counter for species
+  mutate(n_species=1)
+
+# fasy BA
+trees.fasy <- trees.comp %>%
+  filter(species=="fasy") %>%
+  ungroup() %>%
+  # drop unneeded columns
+  dplyr::select(-c(species,evergreen,n_species))
+
+# evergreen BA
+trees.ever <- trees.comp %>%
+  ungroup() %>%
+  # only evergreen
+  filter(evergreen==1) %>%
+  group_by(cell_id,evergreen) %>%
+  summarise(BA_spec=sum(BA_spec))
+
+# bringing it all together
+trees.agg <- trees.struct %>%
+  left_join(trees.ever, by="cell_id") %>%
+  # convert to proportion
+  mutate(prop_evergreen = BA_spec/BA) %>%
+  # drop excess columns
+  dplyr::select(-c(evergreen,BA_spec)) %>%
+  # add fasy
+  left_join(trees.fasy, by="cell_id") %>%
+  mutate(prop_fasy = BA_spec/BA) %>%
+  dplyr::select(-c(BA_spec)) %>%
+  # replace nas with 0s, because trees are present in all of these plots
+  mutate(across(c("prop_evergreen","prop_fasy"),~replace_na(.,0))) %>%
+  # convert BA from m2/10x10m to m2/ha
+  mutate(BA=BA*100)
+
+### climate + site
+
+# prep climate
+clim.ann <- read.csv("processed_data/iland_clim_soils/climate_historical_annual.csv")
+clim.month <- read.csv("processed_data/iland_clim_soils/climate_historical_monthly.csv")
+
+# monthly avgs form monthly values, range_temp for isothermality
+clim.avgmonth <- clim.month %>%
+  # annual values first
+  group_by(table_name,year) %>%
+  summarise(min_month_temp = min(min_temp),
+            max_month_temp = max(max_temp),
+            range_temp = max_month_temp - min_month_temp)
+
+# quarter/seasonal values 
+clim.seas <- clim.month %>%
+  # add season flag
+  mutate(season = ifelse(month %in% c(1,2,12),"winter",
+                         ifelse(month %in% c(3:5),"spring",
+                                ifelse(month %in% c(6:8),"summer",
+                                       ifelse(month %in% c(9:11),"fall",NA))))) %>%
+  # mean temp and precip sums by season
+  group_by(table_name,year,season) %>%
+  summarise(temp = mean(mean_temp), prec=sum(prec)) %>%
+  # pivot so seasons are columns
+  pivot_wider(names_from="season",values_from=c("temp","prec")) %>%
+  rename(summer_temp = temp_summer, winter_temp = temp_winter,
+         summer_prec = prec_summer, winter_prec = prec_winter) %>%
+  mutate(seas_range_temp = summer_temp-winter_temp,
+         seas_range_prec = summer_prec - winter_prec) %>%
+  # remove unneeded values
+  dplyr::select(c(table_name,year,summer_prec,seas_range_prec))
+
+# combine with annual values, calculate 10-yr average 2000-2009
+clim.pred <- clim.ann %>%
+  # add monthly and seasonal values
+  left_join(clim.avgmonth, by=c("table_name","year")) %>%
+  left_join(clim.seas, by=c("table_name","year")) %>%
+  # add isothermality
+  mutate(isotherm = daily_range/range_temp) %>%
+  # filter to 10-year period
+  filter(year %in% c(2000:2009)) %>%
+  # calc norms
+  dplyr::select(-year) %>%
+  group_by(table_name) %>%
+  summarise_all(mean) %>%
+  dplyr::select(table_name,mean_temp,isotherm,summer_prec,seas_range_prec,rad)
+
+# soils from iland
+env.in <- read.table("iland/gis/environment.txt", header=TRUE) %>%
+  dplyr::select(c(id:model.site.pctClay))
+
+# whc equation
+# code from Werner
+# Calculate water holding capacity following the approach of Schwalm & Ek (2004, Ecol. Mod.)
+# pct_sand, pct_silt, pct_clay: soil texture fractions in %
+# soil_depth: stone-free effective soil depth (mm)
+# fc_threshold: field capacity (J kg-1 or kPa), default: 15kPa
+# pwp_threshold: permanent wilting point (J kg-1 or kPa), default 1500kPa
+# return: water holding capacity (between fc and pwp) in mm
+calcWHC <- function(pct_sand, pct_silt, pct_clay, soil_depth, fc_threshold=15, pwp_threshold=4000) {
+  
+  theta_sat = 0.01 * (50.5 - 0.142*pct_sand - 0.037*pct_clay); # Eq. 78
+  bt <- 11.43 - 0.103*pct_sand - 0.0687*pct_silt # Eq. 79
+  rho_e <- -5.99 + 0.0544*pct_sand + 0.0451*pct_silt # Eq 80
+  
+  
+  fc <- theta_sat * (rho_e / -fc_threshold)^(1/bt) * soil_depth # Eq 76
+  pwp <- theta_sat * (rho_e / -pwp_threshold)^(1/bt) * soil_depth # Eq 77
+  whc <- fc-pwp
+  whc
+}
+
+# calc whc
+soil.pred <- env.in %>%
+  mutate(whc = calcWHC(model.site.pctSand,
+                       model.site.pctSilt,
+                       model.site.pctClay,
+                       # convert soil depth from cm to mm
+                       model.site.soilDepth*10)) %>%
+  # also rename soil texture
+  rename(soil_fert = model.site.availableNitrogen,
+         sand = model.site.pctSand,
+         clay = model.site.pctClay,
+         eff_dep = model.site.soilDepth,
+         table_name = model.climate.tableName) %>%
+  # select final variables for consideration
+  dplyr::select(c(id, table_name, sand,whc,soil_fert))
+
+### rid grid to match everything up
+rid.in <- rast("iland/gis/objectid.asc")
+crs(rid.in) <- "epsg:31468"
+
+# disaggregate
+rid.10m <- disagg(rid.in, fact=10)
+
+# crop and match with id.rast
+rid.mask <- extend(rid.10m,grid.noseed)*grid.noseed
+
+# extract values
+pred.site <- values(c(rid.mask,id.rast)) %>%
+  # values(c(rid.mask,id.rast,topo10.in)) %>%
+  as.data.frame() %>%
+  rename(id=objectid,
+         cell_id=lyr.1) %>%
+  # slope_deg=slope) %>%
+  filter(!is.na(id)) %>%
+  # calc aspect
+  # mutate(aspect_ne = cos(deg2rad(45-aspect)) + 1) %>%
+  # dplyr::select(-aspect) %>%
+  left_join(soil.pred, by="id") %>%
+  left_join(clim.pred, by="table_name")
+
+### all together
+pred.all <- pred.site %>%
+  left_join(trees.agg, by="cell_id") %>%
+  left_join(lif.pred, by="cell_id") %>%
+  # assign 0s to NA forest structure values
+  mutate(across(c(BA,dom_height), ~replace_na(.,0))) 
+
+pred.sub <- pred.all %>%
+  dplyr::select(c(id,cell_id,mean_temp,summer_prec,rad,lif,BA,prop_fasy,sand,whc,soil_fert))
+
+# BA v lif, ck to make sure align, looks good
+ggplot(aes(x=lif,y=BA), data=pred.sub) +
+  geom_point() + 
+  theme_bw()
+
+### comment out for Rmd
+# write.csv(pred.sub,"processed_data/iland_sdm_predictions/sdm_predictor_set_nospecies_notstd_10m.csv",row.names=FALSE)
+
+###
+# 5. use sdm model predictors to standardize new predictor set
+###
+
+# read back in if needed
+# pred.sub <- read.csv("processed_data/iland_sdm_predictions/sdm_predictor_set_nospecies_notstd_10m.csv")
+
+# predictors
+sdm.pred <- read.csv("processed_data/understory_model/predictors_subset.csv") %>%
+  # only final predictor set, although still including isotherm, seas range precip, dom_height, prop_evergreen
+  dplyr::select(c(plot_id,mean_temp,summer_prec,rad,TSFdec,BA,prop_fasy,sand,whc,soil_fert)) 
+
+# compare values
+summary(pred.sub)
+summary(sdm.pred)
+# some more extreme values in pred.sub, but generally similar ranges of values
+
+# can plot this
+# prep for 10m
+pred.piv <- pred.sub %>%
+  rename(TSFdec=lif) %>%
+  pivot_longer(-c(id,cell_id)) %>%
+  mutate(data="landscape") %>%
+  dplyr::select(-c(id,cell_id))
+
+# this takes a while if 10m
+sdm.pred %>%
+  pivot_longer(-plot_id) %>%
+  dplyr::select(-plot_id) %>%
+  mutate(data="sdm") %>%
+  rbind(pred.piv) %>%
+  ggplot(aes(y=value)) +
+  facet_wrap(~name,scales="free") +
+  geom_boxplot(aes(color=data)) +
+  theme_bw()
+
+# use mean and sd from sdm predictor set to rescale full landscape
+pred.scaling <- sdm.pred %>%
+  pivot_longer(c(mean_temp:soil_fert)) %>%
+  group_by(name) %>%
+  summarise(mean=mean(value,na.rm=TRUE),
+            sd=sd(value,na.rm=TRUE))
+
+# make sure I have my scaling rules correct
+pred.std <- sdm.pred %>%
+  pivot_longer(c(mean_temp:soil_fert)) %>%
+  left_join(pred.scaling, by=c("name")) %>%
+  mutate(value_calc = (value-mean)/sd) %>%
+  group_by(name) %>%
+  mutate(value_scale = as.numeric(scale(value))) %>%
+  # double ck
+  mutate(diff=value_scale-value_calc)
+
+summary(pred.std) # good
+
+### rules
+# for some values, iland generated values are not the same as plot-measured values, for example light. in this case, standardize lif from iland outputs, assume that plots represent full range of light conditions
+# applies to: lif
+# note: they do have similar range of raw values
+
+# for other values, exact same dataset was used for sdm and iland predictions. so just use scaling rules. there are some extreme values that were not represented in plots, but they generally line up well
+# applies to: climate and site (soils) predictors
+
+# for final set of values, unclear how well we expect iland to match up. start by assuming they should similarly rep whats on the ground, use scaling rules; boxplots generally line up well
+# applies to: forest structure and composition
+
+iland.scalein <- pred.sub %>%
+  dplyr::select(-lif) %>%
+  pivot_longer(-c(id,cell_id)) %>%
+  left_join(pred.scaling, by=c("name")) %>%
+  mutate(value_calc = (value-mean)/sd) %>%
+  dplyr::select(-c(value:sd)) %>%
+  pivot_wider(names_from="name",values_from="value_calc") %>%
+  # replace NAs with 0 for prop_fasy after scaling
+  mutate(across(c(prop_fasy), ~replace_na(.,0)))
+
+summary(iland.scalein)
+pred.std %>%
+  dplyr::select(-c(value:sd,value_scale,diff)) %>%
+  pivot_wider(names_from="name",values_from="value_calc") %>% summary()
+
+# scale light and combine
+iland.scale <- pred.sub %>%
+  mutate(TSFdec = as.numeric(scale(lif))) %>%
+  dplyr::select(c(id,cell_id,TSFdec)) %>%
+  left_join(iland.scalein, by=c("id","cell_id"))
+
+# export 10m
+### comment out for Rmd
+# write.csv(iland.scale, "processed_data/iland_sdm_predictions/sdm_predictor_set_10m.csv",row.names=FALSE)
+
+### save scaling rules for easy application later
+# use 10m version
+
+summary(iland.scale)
+summary(sdm.pred)
+
+# calculate mean and sd for lif
+lif.scaling <- data.frame(name="lif",
+                          mean=mean(pred.sub$lif),
+                          sd=sd(pred.sub$lif))
+
+scaling.out <- pred.scaling %>%
+  rbind(lif.scaling)
+
+### comment out for Rmd
+# write.csv(scaling.out, "processed_data/understory_model/final_fits/predictor_scaling/predictor_scaling_mean_sd.csv",row.names=FALSE)
+```
+
+```{r steps-2-and-3, eval=FALSE}
+
+### NOT rerun in Rmd, time intensive
+
+###################
+######### SECTION 2: use models to predict plant communities
+###################
+
+# NB: This section can be rerun with data included in deposit
+
+### read in everything needed from above
+# 10m
+iland.pred <- read.csv("processed_data/iland_sdm_predictions/sdm_predictor_set_10m.csv") %>%
+  # subset to selected predictions
+  dplyr::select(c(cell_id,id,mean_temp,summer_prec,rad,TSFdec,BA,prop_fasy,soil_fert,whc,sand)) %>%
+  # set generically named id column
+  mutate(id_model = cell_id)
+
+pred.resolution <- "10m"
+
+###
+# 6. predict new values using sdms: run in parallel
+###
+
+### read in reference data
+# only species in 5 or more plots
+pres.sub <- read.csv("processed_data/understory_model/understory_subset_presence_cover.csv")
+# names lookup
+pft.in <- read.csv("processed_data/species_lookup/final_pft_categories_ms.csv") %>%
+  rename(pft_new=pft) %>%
+  dplyr::select(c(species_name,species_name_ellenberg,PlantGrowthForm,pft_new))
+# ellenberg lookup
+ellen.in <- read.xlsx("processed_data/species_lookup/species_lookup_ellenberg.xlsx", sheet="species_lookup_ellenberg")
+# richness corrections
+load("processed_data/understory_model/final_fits/richness_prediction_corrections/richness_corrections.RData")
+# species lookup for richness corrections
+rich.lookup <- data.frame(species_name = unique(pres.sub$species_name)) %>%
+  mutate(species_alt = gsub("[_.-]","",species_name))
+
+### create column with labels for separate chunks
+iland.pred$chunk <- round(iland.pred$id,-2)
+
+### helper functions
+logit <- function(x) {
+  x=ifelse(x<0.0001,0.0001,ifelse(x>0.9999,.9999,x))
+  log(x/(1 - x))
+}
+invlogit <- function(x) {exp(x)/(1+exp(x))}
+
+# ellenberg
+# compute ellenberg mean and wtmean licht, T, F, N for this subset of species
+# functionalize
+ellen_compute <- function(df.in, sp.list) {
+  ellen.sub <- df.in %>%
+    # subset to species list
+    filter(species_name %in% c(sp.list)) %>%
+    # combine with ellenberg indicator data
+    # first get sp name lookup from pft table
+    left_join(pft.in, by="species_name") %>%
+    left_join(ellen.in, by=c("species_name_ellenberg"="species_name")) %>%
+    # remove missing values, also values coded as ? (unknown) or x (insensitive)
+    filter(!is.na(OriglName), !OrigValueStr %in% c("?","x")) %>%
+    # only T and Licht
+    filter(OriglName %in% c("T")) %>%
+    # assign 0B as 0
+    mutate(OrigValueStr = ifelse(OrigValueStr=="0B",0,OrigValueStr)) %>%
+    # all values should now be numeric
+    mutate(OrigValueStr=as.numeric(OrigValueStr)) %>%
+    # get 1 entry per individual
+    dplyr::select(c(id_model,species_name,rf_pred,OriglName,OrigValueStr)) %>%
+    # only present species
+    filter(rf_pred>0) %>%
+    # wted mean
+    group_by(id_model,OriglName) %>%
+    summarise(value=sum(OrigValueStr*rf_pred)/sum(rf_pred)) %>%
+    rename(name=OriglName)
+  
+}
+
+# probability ranking rule - adapted from the ecospat package by Zurell et al. 2020
+SESAM.prr <- function (proba, sr) {
+  projSR <- round(round(as.vector(sr[[1]])))
+  new.prob.prr <- proba
+  dataSSDM_p <- proba
+  for (i in 1:nrow(proba)) {
+    print(paste("test.prr, processing row ", i, sep = ""))
+    SR <- projSR[i]
+    if (SR > 0) {
+      predcom <- dataSSDM_p[i, ]
+      predcom_p <- as.matrix(dataSSDM_p[i, ])  # convert to matrix for ordering
+      com <- order(predcom_p, decreasing = TRUE)
+      pres <- com[1:SR]
+      predcom[, pres] <- 1
+      predcom[, -pres] <- 0
+    }
+    else {
+      predcom[, ] <- 0
+    }
+    new.prob.prr[i, ] <- predcom
+  }
+  new.prob.prr
+}
+
+
+### run in parallel
+# use for testing
+# iland.predsub <- iland.pred %>% filter(chunk==0)
+
+detectCores() # 8
+cl = makeCluster(3) # use 3
+# more on server
+# cl = makeCluster(8)
+registerDoParallel(cl)
+# start of parallel operation
+par.start = Sys.time()
+print(par.start)
+
+foreach(h=unique(iland.pred$chunk),
+        .packages=c('tidyverse','randomForest')) %dopar% {
+   
+  # print(h)
+  # start.time=Sys.time()
+  # print(start.time)
+  
+  iland.predsub <- iland.pred %>% filter(chunk==h)
+  
+  sdm.out <- data.frame()
+    
+  for(k in c(list.files("processed_data/understory_model/final_fits/sdm_prediction_fits", full.names = TRUE))) {
+    
+    print(k)
+    
+    load(k)
+    
+    sp_name <- as.data.frame(k) %>%
+      separate(k, into=c("dir1","dir2","dir3","dir4","name"), sep="/") %>%
+      separate(name, into=c("species_name","suf"), sep=".RD")
+
+    # make individual sdm prediction
+    sdm.pred <- iland.predsub %>%
+      mutate(species_name = sp_name$species_name)
+    sdm.pred$rf_pred <- predict(rf.mod, newdata=sdm.pred)
+    
+    # subset
+    sdm.temp <- sdm.pred %>%
+      dplyr::select(c(id_model,species_name,rf_pred)) 
+    
+    # add to output
+    sdm.out <- rbind(sdm.out, sdm.temp)
+    
+  }
+  
+  ### richness
+  # uncorrected 
+  rich.id <- sdm.out %>%
+    filter(species_name %in% c(pres.sub$species_name)) %>%
+    group_by(id_model) %>%
+    summarise(raw_richness=sum(rf_pred)) %>%
+    arrange(id_model)
+  
+  # corrected
+  sdm.rich <- sdm.out %>%
+    left_join(rich.lookup, by="species_name") %>%
+    dplyr::select(-c(species_name)) %>%
+    pivot_wider(names_from="species_alt", values_from="rf_pred") %>%
+    arrange(id_model) %>%
+    dplyr::select(-id_model)
+  
+  prob.stack <- rowSums(sdm.rich)
+  
+  # correct test data probabilities using probability stack predictions
+  prob.corr.probsum.df <- data.frame( apply(sdm.rich,2,FUN=function(x){invlogit(logit(x)+adj.par.nll$par[1]*prob.stack+adj.par.nll$par[2])}))
+  
+  # probability ranking rule, using sums of corrected probabilities as constraint
+  prr.corr.probsum.df <- SESAM.prr(prob.corr.probsum.df, data.frame(rowSums(prob.corr.probsum.df)) )
+  rich.id$corr_richness <- rowSums(prr.corr.probsum.df) # corrected richness
+
+  ### ellenberg
+  # uncorrected
+  ellen.uncorr <- ellen_compute(sdm.out, unique(pres.sub$species_name)) %>%
+    pivot_wider(names_from="name",values_from="value",names_prefix = "raw_")
+  
+  # corrected
+  # prr predictions
+  sdm.corr <- rich.id %>%
+    dplyr::select(id_model) %>%
+    cbind(prr.corr.probsum.df) %>%
+    pivot_longer(-id_model) %>%
+    left_join(rich.lookup, by=c("name"="species_alt")) %>%
+    dplyr::select(-name) %>%
+    rename(rf_pred=value)
+  
+  ellen.corr <- ellen_compute(sdm.corr, unique(pres.sub$species_name)) %>%
+    pivot_wider(names_from="name",values_from="value",names_prefix = "corr_")
+  
+  ### pft and growth form counts
+  pft.prep <- sdm.corr %>%
+    left_join(pft.in, by="species_name")
+  
+  pft.count <- pft.prep %>%
+    group_by(id_model,pft_new) %>%
+    summarise(rf_pred=sum(rf_pred)) %>%
+    pivot_wider(names_from="pft_new",values_from="rf_pred")
+  
+  life.count <- pft.prep %>%
+    group_by(id_model,PlantGrowthForm) %>%
+    summarise(rf_pred=sum(rf_pred)) %>%
+    pivot_wider(names_from="PlantGrowthForm",values_from="rf_pred")
+  
+  ### landscape
+  # sum counts by species within each chunk, use to summarize landscape-scale change in presence and absence (overall, by red list category)
+  species.out <- sdm.corr %>%
+    mutate(n_plots = 1) %>%
+    group_by(species_name) %>%
+    summarise(rf_pred=sum(rf_pred),n_plots=sum(n_plots))
+
+  # combine plot data
+  plots.out <- rich.id %>%
+    left_join(ellen.uncorr, by="id_model") %>%
+    left_join(ellen.corr, by="id_model") %>%
+    left_join(pft.count, by="id_model") %>%
+    left_join(life.count, by="id_model")
+  
+  ### write out
+  # species
+  write.csv(sdm.corr, paste0("processed_data/iland_sdm_predictions/historical_predictions_10m/sdm_predictions_species_",pred.resolution,"_chunk_",h,".csv"),row.names=FALSE)
+  
+  # species sums
+  write.csv(species.out, paste0("processed_data/iland_sdm_predictions/historical_predictions_10m/sdm_predictions_speciesSums_",pred.resolution,"_chunk_",h,".csv"),row.names=FALSE)
+  
+  # plots
+  write.csv(plots.out, paste0("processed_data/iland_sdm_predictions/historical_predictions_10m/sdm_predictions_plot_",pred.resolution,"_chunk_",h,".csv"),row.names=FALSE)
+  
+  # end.time = Sys.time()
+  
+  # print(end.time-start.time)
+  
+}
+stopCluster(cl)
+  
+### predict cover
+load("processed_data/understory_model/final_fits/mem_prediction_cover/cover_final.RData")
+
+cover.pred <- iland.pred
+
+cover.pred$cover_pct <- predict(final.mod, newdata=cover.pred)
+
+cover.out <- cover.pred %>%
+  dplyr::select(id_model,cover_pct)
+
+rm(cover.pred)
+
+write.csv(cover.out, paste0("processed_data/iland_sdm_predictions/historical_predictions_10m/historical_total_cover.csv"),row.names=FALSE)
+
+###################
+######### SECTION 3: prep for making maps, predictors only
+###################
+
+###
+# 7. generate rasters
+###
+
+res <- "10m"
+
+# predictors
+iland.pred <- read.csv(paste0("processed_data/iland_sdm_predictions/sdm_predictor_set_nospecies_notstd_",res,".csv")) %>%
+  dplyr::select(c(cell_id,mean_temp,summer_prec,rad,lif,BA,prop_fasy,sand,whc,soil_fert)) %>%
+  rename(id_model = cell_id) %>%
+  pivot_longer(-id_model)
+
+# rid grid to match everything up
+rid.in <- rast("processed_data/iland_sdm_predictions/stand_id_raster.tif")
+rid.sub <- as.data.frame(values(rid.in)) %>%
+  rename(id_model = lyr.1) %>%
+  filter(!is.na(id_model))
+
+crs(rid.in) <- "epsg:31468"
+plot(rid.in)  
+
+# generate rasters
+rast.out <- rid.in
+
+for(i in unique(iland.pred$name)) {
+  print(i)
+  name.in <- i
+  
+  rast.prep <- iland.pred %>%
+    filter(name==name.in) %>%
+    dplyr::select(id_model,value)
+  
+  rid.na <- rid.sub %>%
+    filter(!(id_model %in% c(rast.prep$id_model))) %>%
+    mutate(value=NA) %>%
+    rbind(rast.prep)
+  
+  rast.class <- classify(rid.in,rcl = cbind(rid.na$id_model,rid.na$value))
+  names(rast.class) <- name.in
+  plot(rast.class)
+  
+  rast.out <- c(rast.out,rast.class)
+}
+
+writeRaster(rast.out[[-1]], filename=paste0("processed_data/iland_sdm_predictions/prediction_rasters_",res,".tif"),overwrite=TRUE)
+
+
+```

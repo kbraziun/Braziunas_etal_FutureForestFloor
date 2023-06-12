@@ -1,0 +1,992 @@
+---
+title: "Map future understory from iLand outputs"
+author: "Kristin Braziunas"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = '../')
+```
+
+```{r full-script, eval=FALSE}
+#####
+# 
+## Step 9: Predict and map future understory communities: plot-level at 10m resolution
+#
+#####
+
+# if running on server
+# write("TMP = 'temp''", file = file.path('~/.Renviron'))
+
+### load libraries
+library(tidyverse)
+library(sp)
+library(terra)
+library(randomForest)
+library(openxlsx)
+
+### stratified random sampling
+library(sgsR)
+
+# running in parallel
+library(parallel)
+library(foreach) 
+library(doParallel) 
+
+### wd is one level up, recommend set up Rproj or:
+# setwd("../")
+
+### selected sessionInfo()
+# R version 4.1.3 (2022-03-10)
+# Platform: x86_64-w64-mingw32/x64 (64-bit)
+# Running under: Windows 10 x64 (build 17763)
+# 
+# attached base packages:
+#   [1] parallel  stats     graphics  grDevices utils     datasets  methods   base     
+# 
+# other attached packages:
+#   [1] doParallel_1.0.17  iterators_1.0.14   foreach_1.5.2      sgsR_1.3.2        
+# [5] openxlsx_4.2.5     randomForest_4.7-1 terra_1.6-17       sp_1.5-0          
+# [9] forcats_0.5.1      stringr_1.4.1      dplyr_1.0.8        purrr_0.3.4       
+# [13] readr_2.1.2        tidyr_1.2.0        tibble_3.1.6       ggplot2_3.3.5     
+# [17] tidyverse_1.3.1  
+
+###
+# 1. read in predictor data
+###
+
+# read in scaling values
+scale.in <- read.csv("processed_data/understory_model/final_fits/predictor_scaling/predictor_scaling_mean_sd.csv")
+
+# read in climate and site predictors, scale climate predictors
+site.in <- read.csv("processed_data/iland_clim_soils/future_predictors/sdm_predictor_set_site_10m.csv")
+clim.in <- read.csv("processed_data/iland_clim_soils/future_predictors/sdm_predictor_set_climate_10m.csv") %>%
+  dplyr::select(c(id_model,gcm,decade,mean_temp,summer_prec,rad)) %>%
+  pivot_longer(c(mean_temp:rad)) %>%
+  left_join(scale.in, by="name") %>%
+  # rescale using original mean and sd
+  mutate(value_calc = (value-mean)/sd) %>%
+  # drop unscaled values
+  dplyr::select(-c(value:sd)) %>%
+  pivot_wider(names_from="name",values_from="value_calc")
+
+# only get plot-level aggregated values for species present in 5 or more plots
+# subset to only species in 5 or more plots
+pres.sub <- read.csv("processed_data/understory_model/understory_subset_presence_cover.csv")
+# names lookup
+pft.in <- read.csv("processed_data/species_lookup/final_pft_categories_ms.csv") %>%
+  rename(pft_new=pft) %>%
+  dplyr::select(c(species_name,species_name_ellenberg,PlantGrowthForm,pft_new))
+
+ellen.in <- read.xlsx("processed_data/species_lookup/species_lookup_ellenberg.xlsx", sheet="species_lookup_ellenberg")
+
+# richness corrections
+load("processed_data/understory_model/final_fits/richness_prediction_corrections/richness_corrections.RData")
+
+# species lookup for richness corrections
+rich.lookup <- data.frame(species_name = unique(pres.sub$species_name)) %>%
+  mutate(species_alt = gsub("[_.-]","",species_name))
+
+###
+# 2. helper functions
+###
+
+### helper functions
+logit <- function(x) {
+  x=ifelse(x<0.0001,0.0001,ifelse(x>0.9999,.9999,x))
+  log(x/(1 - x))
+}
+invlogit <- function(x) {exp(x)/(1+exp(x))}
+
+# ellenberg
+# compute ellenberg mean and wtmean licht, T, F, N for this subset of species
+# functionalize
+ellen_compute <- function(df.in, sp.list) {
+  ellen.sub <- df.in %>%
+    # subset to species list
+    filter(species_name %in% c(sp.list)) %>%
+    # combine with ellenberg indicator data
+    # first get sp name lookup from pft table
+    left_join(pft.in, by="species_name") %>%
+    left_join(ellen.in, by=c("species_name_ellenberg"="species_name")) %>%
+    # remove missing values, also values coded as ? (unknown) or x (insensitive)
+    filter(!is.na(OriglName), !OrigValueStr %in% c("?","x")) %>%
+    # only T and Licht
+    filter(OriglName %in% c("T")) %>%
+    # assign 0B as 0
+    mutate(OrigValueStr = ifelse(OrigValueStr=="0B",0,OrigValueStr)) %>%
+    # all values should now be numeric
+    mutate(OrigValueStr=as.numeric(OrigValueStr)) %>%
+    # get 1 entry per individual
+    dplyr::select(c(id_model,species_name,rf_pred,OriglName,OrigValueStr)) %>%
+    # only present species
+    filter(rf_pred>0) %>%
+    # wted mean
+    group_by(id_model,OriglName) %>%
+    summarise(value=sum(OrigValueStr*rf_pred)/sum(rf_pred)) %>%
+    rename(name=OriglName)
+  
+}
+
+# probability ranking rule - adapted from the ecospat package by Zurell et al. 2020
+SESAM.prr <- function (proba, sr) {
+  projSR <- round(round(as.vector(sr[[1]])))
+  new.prob.prr <- proba
+  dataSSDM_p <- proba
+  for (i in 1:nrow(proba)) {
+    print(paste("test.prr, processing row ", i, sep = ""))
+    SR <- projSR[i]
+    if (SR > 0) {
+      predcom <- dataSSDM_p[i, ]
+      predcom_p <- as.matrix(dataSSDM_p[i, ])  # convert to matrix for ordering
+      com <- order(predcom_p, decreasing = TRUE)
+      pres <- com[1:SR]
+      predcom[, pres] <- 1
+      predcom[, -pres] <- 0
+    }
+    else {
+      predcom[, ] <- 0
+    }
+    new.prob.prr[i, ] <- predcom
+  }
+  new.prob.prr
+}
+
+###
+# 3. predict future community-level responses
+###
+
+pred.listin <- read.csv("processed_data/iland_sdm_predictions/prediction_scenarios.csv") %>%
+  mutate(forest_climate = paste(pred_forest,pred_climate,sep="_"))
+
+# expand list based on number of reps
+pred.listfull <- data.frame()
+for(i in 1:dim(pred.listin)[1]) {
+  # print(i)
+  
+  for(j in 1:pred.listin[i,]$pred_reps) {
+    print(pred.listin[i,])
+    list.out <- data.frame(cbind(pred.listin[i,],rep=j))
+    
+    pred.listfull <- rbind(pred.listfull,list.out)
+  }
+  
+}
+
+# here only output full predictions for future_future runs
+pred.list <- pred.listfull %>%
+  filter(forest_climate=="future_future")
+
+### load predictors for given scenario
+pred.resolution <- "10m"
+
+for(i in 1:dim(pred.list)[1]) {
+  print(i)
+  
+  # load and prep forest predictors
+  for.pred <- read.csv(paste0("iland/output/combined_outputs/",pred.list[i,]$pred_gcm,"_",pred.list[i,]$pred_wind,"_",pred.list[i,]$rep,"_forest_predictors.csv")) %>%
+    mutate(decade = ifelse(year==30, 2050,
+                         ifelse(year==80,2100,NA))) %>%
+    filter(decade %in% c(pred.list[i,]$pred_decade)) %>%
+    dplyr::select(c(cell_id,decade,lif,BA,prop_fasy)) 
+    
+  # combine with climate and site predictors, rescale
+  iland.pred <- clim.in %>%
+    filter(gcm==pred.list[i,]$pred_gcm,decade==pred.list[i,]$pred_decade) %>%
+    left_join(site.in, by=c("id_model")) %>%
+    left_join(for.pred, by=c("id_model"="cell_id","decade")) %>%
+    # assign 0s to NA forest structure values
+    mutate(across(c(BA), ~replace_na(.,0))) %>%
+    # assign 1 to lif when no forest
+    mutate(lif = replace_na(lif, 1)) %>%
+    # pivot longer forest predictors, rest already scaled
+    pivot_longer(c(BA,lif,prop_fasy)) %>%
+    left_join(scale.in, by="name") %>%
+    # rescale using original mean and sd
+    mutate(value_calc = (value-mean)/sd) %>%
+    dplyr::select(-c(value:sd)) %>%
+    pivot_wider(names_from="name",values_from="value_calc") %>%
+    rename(TSFdec=lif) %>%
+    # here replace NAs with 0 for prop_fasy, will be equal to original mean
+    mutate(across(c(prop_fasy), ~replace_na(.,0))) %>%
+    dplyr::select(-cell_id)
+  
+  ### first predict cover
+  load("processed_data/understory_model/final_fits/mem_prediction_cover/cover_final.RData")
+  
+  cover.pred <- iland.pred
+  
+  cover.pred$cover_pct <- predict(final.mod, newdata=cover.pred)
+  
+  cover.out <- cover.pred %>%
+    dplyr::select(id_model,cover_pct)
+  
+  # clean up
+  rm(cover.pred)
+  
+  # write out
+  write.csv(cover.out, paste0("processed_data/iland_sdm_predictions/future_predictions_10m/",pred.list[i,]$pred_forest,"Forest_",pred.list[i,]$pred_climate,"Climate_",pred.list[i,]$pred_gcm,"_",pred.list[i,]$pred_wind,"_",pred.list[i,]$rep,"_",pred.list[i,]$pred_decade,"_total_cover.csv"),row.names=FALSE)
+  
+  ### next species responses
+
+  # create column with labels for separate chunks
+  iland.pred$chunk <- round(iland.pred$id,-2)
+
+  # iland.predsub <- iland.pred %>% filter(chunk==0)
+
+  detectCores() # 8
+  cl = makeCluster(4) # use 3, trying 4
+  # more on server, 40
+  # cl = makeCluster(10)
+  registerDoParallel(cl)
+  # start of parallel operation
+  par.start = Sys.time()
+  print(par.start)
+
+  # run in parallel over all chunks
+  foreach(h=unique(iland.pred$chunk),
+          .packages=c('tidyverse','randomForest')) %dopar% {
+    
+    ### benchmarking        
+    # print(h)
+    # start.time=Sys.time()
+    # print(start.time)
+    
+    iland.predsub <- iland.pred %>% filter(chunk==h)
+    
+    sdm.out <- data.frame()
+    
+    # loop through all species
+    for(k in c(list.files("processed_data/understory_model/final_fits/sdm_prediction_fits", full.names = TRUE))) {
+      
+      print(k)
+      
+      load(k)
+      
+      sp_name <- as.data.frame(k) %>%
+        separate(k, into=c("dir1","dir2","dir3","dir4","name"), sep="/") %>%
+        separate(name, into=c("species_name","suf"), sep=".RD")
+      
+      # make individual sdm prediction
+      sdm.pred <- iland.predsub %>%
+        mutate(species_name = sp_name$species_name)
+      sdm.pred$rf_pred <- predict(rf.mod, newdata=sdm.pred)
+      
+      # select columns
+      sdm.temp <- sdm.pred %>%
+        dplyr::select(c(id_model,species_name,rf_pred)) 
+      
+      # add to output
+      sdm.out <- rbind(sdm.out, sdm.temp)
+      
+    }
+    
+    ### richness
+    # uncorrected 
+    rich.id <- sdm.out %>%
+      filter(species_name %in% c(pres.sub$species_name)) %>%
+      group_by(id_model) %>%
+      summarise(raw_richness=sum(rf_pred)) %>%
+      arrange(id_model)
+    
+    # corrected
+    sdm.rich <- sdm.out %>%
+      left_join(rich.lookup, by="species_name") %>%
+      dplyr::select(-c(species_name)) %>%
+      pivot_wider(names_from="species_alt", values_from="rf_pred") %>%
+      arrange(id_model) %>%
+      dplyr::select(-id_model)
+    
+    prob.stack <- rowSums(sdm.rich)
+    
+    # correct test data probabilities using probability stack predictions
+    prob.corr.probsum.df <- data.frame( apply(sdm.rich,2,FUN=function(x){invlogit(logit(x)+adj.par.nll$par[1]*prob.stack+adj.par.nll$par[2])}))
+    
+    # probability ranking rule, using sums of corrected probabilities as constraint
+    prr.corr.probsum.df <- SESAM.prr(prob.corr.probsum.df, data.frame(rowSums(prob.corr.probsum.df)) )
+    rich.id$corr_richness <- rowSums(prr.corr.probsum.df) # corrected richness
+    
+    ### ellenberg
+    # uncorrected
+    # ellen.uncorr <- ellen_compute(sdm.out, unique(pres.sub$species_name)) %>%
+    #   pivot_wider(names_from="name",values_from="value",names_prefix = "raw_")
+    
+    # corrected
+    # prr predictions
+    sdm.corr <- rich.id %>%
+      dplyr::select(id_model) %>%
+      cbind(prr.corr.probsum.df) %>%
+      pivot_longer(-id_model) %>%
+      left_join(rich.lookup, by=c("name"="species_alt")) %>%
+      dplyr::select(-name) %>%
+      rename(rf_pred=value)
+    
+    ellen.corr <- ellen_compute(sdm.corr, unique(pres.sub$species_name)) %>%
+      pivot_wider(names_from="name",values_from="value",names_prefix = "corr_")
+    
+    ### pft and growth form counts
+    pft.prep <- sdm.corr %>%
+      left_join(pft.in, by="species_name")
+    
+    pft.count <- pft.prep %>%
+      group_by(id_model,pft_new) %>%
+      summarise(rf_pred=sum(rf_pred)) %>%
+      pivot_wider(names_from="pft_new",values_from="rf_pred")
+    
+    life.count <- pft.prep %>%
+      group_by(id_model,PlantGrowthForm) %>%
+      summarise(rf_pred=sum(rf_pred)) %>%
+      pivot_wider(names_from="PlantGrowthForm",values_from="rf_pred")
+    
+    ### turnover: # retained, # new, # lost
+    # turnover calculated based on Cleland et al. 2013
+    # Cleland, Elsa E., Scott L. Collins, Timothy L. Dickson, Emily C. Farrer, Katherine L. Gross, Laureano A. Gherardi, Lauren M. Hallett et al. "Sensitivity of grassland plant community composition to spatial vs. temporal variation in precipitation." Ecology 94, no. 8 (2013): 1687-1696.
+    # [(new species) + (lost species)]/(total species including both time periods)
+    # read in historical species predictions for same chunk
+    turn.prep <- read.csv(paste0("processed_data/iland_sdm_predictions/historical_predictions_10m/sdm_predictions_species_10m_chunk_",h,".csv")) %>%
+      rename(hx_pred = rf_pred) %>%
+      left_join(sdm.corr, by=c("id_model","species_name")) %>%
+      # label retained, new, lost; rest are NA
+      mutate(turnover = ifelse(hx_pred==1 & rf_pred==1,"retained",
+                               ifelse(hx_pred==0 & rf_pred==1,"new",
+                                      ifelse(hx_pred==1 & rf_pred==0,"lost",NA)))) 
+    
+    # plot-level turnover
+    turn.count <- turn.prep %>%
+      # add counter
+      mutate(count = 1) %>%
+      # remove NA species
+      filter(!is.na(turnover)) %>%
+      # sum for each rep and sample
+      group_by(id_model,turnover) %>%
+      summarise(count=sum(count)) %>%
+      pivot_wider(names_from="turnover",values_from="count")
+    
+    ### landscape
+    # sum counts by species within each chunk, use to summarize landscape-scale change in presence and absence (overall, by red list category)
+    species.out <- sdm.corr %>%
+      mutate(n_plots = 1) %>%
+      group_by(species_name) %>%
+      summarise(rf_pred=sum(rf_pred),n_plots=sum(n_plots))
+    
+    plots.out <- rich.id %>%
+      dplyr::select(id_model,corr_richness) %>%
+      # left_join(ellen.uncorr, by="id_model") %>%
+      left_join(ellen.corr, by="id_model") %>%
+      left_join(pft.count, by="id_model") %>%
+      left_join(life.count, by="id_model") %>%
+      left_join(turn.count, by="id_model")
+    
+    ### write out
+    # species sums
+    write.csv(species.out, paste0("processed_data/iland_sdm_predictions/future_predictions_10m/",pred.list[i,]$pred_forest,"Forest_",pred.list[i,]$pred_climate,"Climate_",pred.list[i,]$pred_gcm,"_",pred.list[i,]$pred_wind,"_",pred.list[i,]$rep,"_",pred.list[i,]$pred_decade,"_speciesSums_chunk_",h,".csv"),row.names=FALSE)
+    
+    # plots
+    write.csv(plots.out, paste0("processed_data/iland_sdm_predictions/future_predictions_10m/",pred.list[i,]$pred_forest,"Forest_",pred.list[i,]$pred_climate,"Climate_",pred.list[i,]$pred_gcm,"_",pred.list[i,]$pred_wind,"_",pred.list[i,]$rep,"_",pred.list[i,]$pred_decade,"_plot_chunk_",h,".csv"),row.names=FALSE)
+                                
+    # end.time = Sys.time()
+    
+    # print(end.time-start.time)
+
+    }
+  stopCluster(cl)
+  rm(for.pred)
+  rm(iland.pred)
+  gc()
+  
+
+}
+
+###
+# 4. average change by replicate and scenario, response maps
+###
+
+# continues to use pred.list from above
+
+### overall means
+# cover by scenario
+cover.meanout <- data.frame()
+for(i in 1:dim(pred.list)[1]) {
+  print(i)
+  # read in each rep
+  cover.in <- read_csv(paste0("processed_data/iland_sdm_predictions/future_predictions_10m/",pred.list[i,]$pred_forest,"Forest_",pred.list[i,]$pred_climate,"Climate_",pred.list[i,]$pred_gcm,"_",pred.list[i,]$pred_wind,"_",pred.list[i,]$rep,"_",pred.list[i,]$pred_decade,"_total_cover.csv"))
+  
+  # mean and cv across entire landscape
+  cover.mean <- cbind(pred.list[i,],data.frame(mean_cover_pct = mean(cover.in$cover_pct),
+                                               cv_cover_pct = (sd(cover.in$cover_pct)/mean(cover.in$cover_pct))*100))
+  
+  # add to df
+  cover.meanout <- rbind(cover.meanout, cover.mean)
+}
+
+
+# richness and T by scenario
+# list of chunks
+chunk.list <- read.csv(paste0("processed_data/iland_sdm_predictions/sdm_predictor_set_10m.csv")) %>%
+  dplyr::select(c(id,cell_id)) %>%
+  mutate(chunk = round(id,-2))
+
+resp.meanout <- data.frame()
+# loop through reps and chunks
+for(i in 1:dim(pred.list)[1]) {
+  print(i)
+  
+  resp.out <- data.frame()
+  for(j in unique(chunk.list$chunk)) {
+    # print(j)
+    
+    # read in chunk
+    resp.in <- read.csv(paste0("processed_data/iland_sdm_predictions/future_predictions_10m/",pred.list[i,]$pred_forest,"Forest_",pred.list[i,]$pred_climate,"Climate_",pred.list[i,]$pred_gcm,"_",pred.list[i,]$pred_wind,"_",pred.list[i,]$rep,"_",pred.list[i,]$pred_decade,"_plot_chunk_",j,".csv")) %>%
+      dplyr::select(c(id_model,corr_richness,corr_T))
+    
+    # combine into 1 df
+    resp.out <- rbind(resp.out,resp.in)
+    
+  }
+  
+  # mean and cv richness and T by rep
+  resp.mean <- cbind(pred.list[i,],data.frame(mean_richness = mean(resp.out$corr_richness),
+                                              cv_richness = (sd(resp.out$corr_richness)/mean(resp.out$corr_richness))*100,
+                                              mean_T = mean(resp.out$corr_T),
+                                              cv_T = (sd(resp.out$corr_T)/mean(resp.out$corr_T))*100))
+  
+  # save to output
+  resp.meanout <- rbind(resp.meanout, resp.mean)
+  
+  rm(resp.out)
+  gc()
+}
+
+# combine with cover and write out
+cover.meanout %>%
+  left_join(resp.meanout, by=c("pred_decade","pred_forest","pred_climate","pred_gcm","pred_wind","pred_reps","forest_climate","rep")) %>%
+  write.csv("processed_data/iland_sdm_predictions/future_prediction_summaries/scenario_mean_cv.csv",row.names=FALSE)
+
+
+### spatial change in cover, richness, T by scenario
+# cover by scenario
+# use chunks
+cover.spout <- data.frame()
+cover.subout <- data.frame()
+
+# iterate through chunks
+for(j in unique(chunk.list$chunk)) {
+  print(j) 
+  # print(Sys.time())
+  
+  chunk.sub <- chunk.list %>%
+    filter(chunk==j)
+  
+  cover.out <- data.frame()
+  # iterate through scenarios
+  for(i in 1:dim(pred.list)[1]) {
+    # print(i)
+    
+    # read in all reps of predicted cover for given chunk
+    cover.in <- read_csv(paste0("processed_data/iland_sdm_predictions/future_predictions_10m/",pred.list[i,]$pred_forest,"Forest_",pred.list[i,]$pred_climate,"Climate_",pred.list[i,]$pred_gcm,"_",pred.list[i,]$pred_wind,"_",pred.list[i,]$rep,"_",pred.list[i,]$pred_decade,"_total_cover.csv"),
+                         col_types = cols(
+                           id_model = col_double(),
+                           cover_pct = col_double())) %>%
+      filter(id_model %in% c(chunk.sub$cell_id)) %>%
+      cbind(pred.list[i,],row.names=NULL)
+    
+    cover.out <- rbind(cover.out, cover.in)
+  }
+  
+  # average change and variability across all scenarios
+  cover.sp <- cover.out %>%
+    group_by(forest_climate,pred_decade,id_model) %>%
+    summarise(cover_mean = mean(cover_pct),
+              cover_cv = (sd(cover_pct)/cover_mean) * 100)
+  
+  # change and variability by scenario
+  cover.sub <- cover.out %>%
+    group_by(forest_climate,pred_decade,pred_gcm,pred_wind,id_model) %>%
+    summarise(cover_mean = mean(cover_pct),
+              cover_cv = (sd(cover_pct)/cover_mean) * 100)
+  
+  # combine chunks
+  cover.spout <- rbind(cover.spout,cover.sp)
+  cover.subout <- rbind(cover.subout,cover.sub)
+  
+  # clean up
+  rm(cover.out)
+  rm(cover.sp)
+  rm(cover.sub)
+  gc()
+  
+}
+
+# write out
+write.csv(cover.spout, "processed_data/iland_sdm_predictions/future_prediction_summaries/spatial_cover_change.csv",row.names=FALSE)
+write.csv(cover.subout, "processed_data/iland_sdm_predictions/future_prediction_summaries/spatial_cover_change_scenarios.csv",row.names=FALSE) 
+
+
+# richness and T by scenario
+resp.spout <- data.frame()
+resp.subout <- data.frame()
+
+# iterate through chunks
+for(j in unique(chunk.list$chunk)) {
+  print(j)
+  # print(Sys.time())
+  
+  chunk.sub <- chunk.list %>%
+    filter(chunk==j)
+  
+  resp.out <- data.frame()
+  # iterate through scenarios
+  for(i in 1:dim(pred.list)[1]) {
+    # print(i)
+    
+    # read in all reps of responses for given chunk
+    resp.in <- read.csv(paste0("processed_data/iland_sdm_predictions/future_predictions_10m/",pred.list[i,]$pred_forest,"Forest_",pred.list[i,]$pred_climate,"Climate_",pred.list[i,]$pred_gcm,"_",pred.list[i,]$pred_wind,"_",pred.list[i,]$rep,"_",pred.list[i,]$pred_decade,"_plot_chunk_",j,".csv")) %>%
+      # replace nas for new, lost, retained with 0
+      mutate(across(c(new,lost,retained),~replace_na(.,0))) %>%
+      mutate(turnover=(new+lost)/(new+lost+retained)) %>%
+      cbind(pred.list[i,],row.names=NULL)
+    
+    resp.out <- rbind(resp.out,resp.in)
+  }
+  
+  # average change and variability across all scenarios
+  resp.sp <- resp.out %>%
+    pivot_longer(c(light_cold:retained)) %>%
+    group_by(forest_climate,pred_decade,id_model,name) %>%
+    summarise(mean_richness = mean(corr_richness),
+              cv_richness = (sd(corr_richness)/mean_richness) * 100,
+              mean_T = mean(corr_T),
+              cv_T = (sd(corr_T)/mean_T)*100,
+              mean_turnover=mean(turnover),
+              cv_turnover=(sd(corr_T)/mean_T)*100,
+              mean_value = mean(value)) %>%
+    pivot_wider(names_from="name",values_from="mean_value") %>%
+    dplyr::select(c(forest_climate:cv_turnover,light_cold,light_indiff,light_warm,shade_cold,shade_indiff,shade_warm,fern,graminoid,herb,shrub,lost,new,retained))
+  
+  # change and variability by scenario
+  resp.sub <- resp.out %>%
+    pivot_longer(c(light_cold:retained)) %>%
+    group_by(forest_climate,pred_decade,pred_gcm,pred_wind,id_model,name) %>%
+    summarise(mean_richness = mean(corr_richness),
+              cv_richness = (sd(corr_richness)/mean_richness) * 100,
+              mean_T = mean(corr_T),
+              cv_T = (sd(corr_T)/mean_T)*100,
+              mean_turnover=mean(turnover),
+              cv_turnover=(sd(corr_T)/mean_T)*100,
+              mean_value = mean(value)) %>%
+    pivot_wider(names_from="name",values_from="mean_value") %>%
+    dplyr::select(c(forest_climate:cv_turnover,light_cold,light_indiff,light_warm,shade_cold,shade_indiff,shade_warm,fern,graminoid,herb,shrub,lost,new,retained))
+  
+  # combine chunks
+  resp.spout <- rbind(resp.spout,resp.sp)
+  resp.subout <- rbind(resp.subout,resp.sub)
+  
+  # clean up
+  rm(resp.out)
+  rm(resp.sp)
+  rm(resp.sub)
+  gc()
+  
+}
+
+# write out
+write.csv(resp.spout, "processed_data/iland_sdm_predictions/future_prediction_summaries/spatial_response_change.csv",row.names=FALSE)
+write.csv(resp.subout, "processed_data/iland_sdm_predictions/future_prediction_summaries/spatial_response_change_scenarios.csv",row.names=FALSE)
+
+### maps
+
+# rid grid
+rid.in <- rast("processed_data/iland_sdm_predictions/stand_id_raster.tif")
+rid.sub <- as.data.frame(values(rid.in)) %>%
+  rename(id_model = lyr.1) %>%
+  filter(!is.na(id_model))
+crs(rid.in) <- "epsg:31468"
+plot(rid.in)  
+
+# read in responses
+# historical richness, T, cover
+cover.hx <- read.csv("processed_data/iland_sdm_predictions/historical_predictions_10m/historical_total_cover.csv") %>%
+  rename(cover=cover_pct) %>%
+  mutate(decade="2020",scen="all") %>%
+  pivot_longer(cover)
+
+hx.in <- list.files("processed_data/iland_sdm_predictions/historical_predictions_10m/", pattern="_plot_", full.names = TRUE) %>%
+  map_df(~read_csv(.)) %>%
+  mutate(decade="2020",scen="all") %>%
+  dplyr::select(c(id_model,corr_richness,corr_T,decade,scen)) %>%
+  rename(richness=corr_richness,
+         eivTemp=corr_T) %>%
+  pivot_longer(c(richness,eivTemp))
+
+# avg richness, T, cover in 2050 and 2100
+cover.spin <- read.csv("processed_data/iland_sdm_predictions/future_prediction_summaries/spatial_cover_change.csv") %>%
+  rename(cover=cover_mean,
+         decade=pred_decade) %>%
+  dplyr::select(c(id_model,decade,cover)) %>%
+  mutate(scen="all") %>%
+  pivot_longer(cover)
+
+resp.spin <- read.csv("processed_data/iland_sdm_predictions/future_prediction_summaries/spatial_response_change.csv") %>%
+  rename(richness=mean_richness,
+         eivTemp=mean_T,
+         decade=pred_decade,
+         turnover=mean_turnover) %>%
+  dplyr::select(c(id_model,decade,richness,eivTemp,turnover,lost)) %>%
+  mutate(scen="all") %>%
+  pivot_longer(c(richness,eivTemp,turnover,lost))
+
+# cover for disturbance scenarios
+cover.subin <- read.csv("processed_data/iland_sdm_predictions/future_prediction_summaries/spatial_cover_change_scenarios.csv") %>%
+  rename(cover=cover_mean,
+         decade=pred_decade) %>%
+  mutate(scen=paste0("wind_",pred_wind)) %>%
+  dplyr::select(c(id_model,decade,cover,scen)) %>%
+  pivot_longer(cover)
+  
+# combine responses
+resp.all <- cover.hx %>%
+  rbind(hx.in) %>%
+  rbind(cover.spin) %>%
+  rbind(resp.spin) %>%
+  rbind(cover.subin) %>%
+  mutate(response = paste(name,scen,decade,sep="_"))
+
+# create raster with all responses for spatial analysis and plotting
+rast.out <- rid.in
+
+for(i in unique(resp.all$response)) {
+  print(i)
+  name.in <- i 
+  
+  rast.prep <- resp.all %>%
+    filter(response==name.in) %>%
+    dplyr::select(id_model,value)
+  
+  rid.na <- rid.sub %>%
+    filter(!(id_model %in% c(rast.prep$id_model))) %>%
+    mutate(value=NA) %>%
+    rbind(rast.prep)
+  
+  rast.class <- classify(rid.in,rcl = cbind(rid.na$id_model,rid.na$value))
+  names(rast.class) <- name.in
+  plot(rast.class, main=name.in)
+  
+  rast.out <- c(rast.out,rast.class)
+}
+
+writeRaster(rast.out[[-1]], filename=paste0("processed_data/iland_sdm_predictions/response_rasters.tif"),overwrite=TRUE)
+
+###
+# 5. landscape-scale species loss
+###
+
+# double check that all species present in historical scenario
+spsums.hx <- setNames(
+  list.files("processed_data/iland_sdm_predictions/historical_predictions_10m/", pattern="speciesSums", full.names=TRUE), 
+  list.files("processed_data/iland_sdm_predictions/historical_predictions_10m/", pattern="speciesSums")) %>%
+  map_dfr(read.csv, .id = NULL) %>%
+  group_by(species_name) %>%
+  summarise_all(sum) %>%
+  # mutate(prev=rf_pred/n_plots) %>%
+  rename(pres_plots=rf_pred,total_plots=n_plots) %>%
+  # add columns
+  mutate(pred_decade="2020",
+         pred_gcm=NA,pred_wind=NA,pred_rep=NA,lost=NA)
+summary(spsums.hx)
+
+# read in species sums for each chunk and scenario
+spsums.in <- setNames(
+  list.files("processed_data/iland_sdm_predictions/future_predictions_10m/", pattern="speciesSums", full.names=TRUE), 
+  list.files("processed_data/iland_sdm_predictions/future_predictions_10m/", pattern="speciesSums")) %>%
+  map_dfr(read.csv, .id = "run_id")
+
+# assign scenario name
+# run separately for efficiency
+spsums.scens <- data.frame(run_id = unique(spsums.in$run_id),run_id2 = unique(spsums.in$run_id)) %>%
+  separate(run_id2, into=c("pref1","pref2","gcm","rcp","gcm2","gcm3","pred_wind","pred_rep","pred_decade","csv_name","chunk","suff"), sep="_") %>%
+  mutate(forest_climate = paste(pref1,pref2,sep="_"),
+         pred_gcm = paste(gcm,rcp,gcm2,gcm3,sep="_")) %>%
+  dplyr::select(c(run_id,forest_climate,pred_decade,pred_gcm,pred_wind,pred_rep)) 
+
+# merge these
+spsums.agg <- spsums.in %>%
+  left_join(spsums.scens, by=c("run_id")) %>%
+  dplyr::select(-run_id) %>%
+  # sum species presence
+  group_by(pred_decade,pred_gcm,pred_wind,pred_rep,species_name) %>%
+  summarise(pres_plots = sum(rf_pred),
+            total_plots = sum(n_plots)) %>%
+  # add counter for lost species
+  mutate(lost = ifelse(pres_plots==0,1,0)) %>%
+  # add hx
+  rbind(spsums.hx)
+
+# write out
+write.csv(spsums.agg, "processed_data/iland_sdm_predictions/future_prediction_summaries/scenario_species_lost.csv",row.names=FALSE)
+
+###
+# 6. random sample, predict individual species
+###
+
+### take simple random sample of 1000 points
+rid.in <- rast("processed_data/iland_sdm_predictions/stand_id_raster.tif")
+crs(rid.in) <- "epsg:31468"
+plot(rid.in) 
+
+# simple random sampling
+set.seed(137)
+samp <- sample_srs(raster = rid.in, 
+                     nSamp = 1000, # request 1000 samples
+                     mindist = 100, # samples must be 100 m apart
+                     plot = TRUE)
+
+# extract cell id 
+samp$id_model <- terra::extract(rid.in$lyr.1, samp,ID=FALSE,raw=TRUE)
+
+samp.df <- as.data.frame(samp) %>%
+  dplyr::select(id_model) 
+
+write.csv(samp.df, "processed_data/iland_sdm_predictions/rand_sample_points.csv",row.names=FALSE)
+
+# also write out elevation for each id
+dem.in <- rast("iland/gis/dem100_rid.asc")
+crs(dem.in) <- "epsg:31468"
+# classify by elevation class
+dem.10m <- dem.in %>%
+  disagg(fact=10) %>%
+  mask(rid.in)
+
+as.data.frame(values(c(rid.in,dem.10m))) %>% 
+  filter(!is.na(lyr.1)) %>%
+  rename(id_model=lyr.1,
+         elev_m = dem100_rid) %>%
+  write.csv("processed_data/iland_sdm_predictions/id_elev_lookup.csv",row.names=FALSE)
+
+
+### predict these plots for all scenarios
+# read in pred list again
+pred.listin <- read.csv("processed_data/iland_sdm_predictions/prediction_scenarios.csv") %>%
+  mutate(forest_climate = paste(pred_forest,pred_climate,sep="_"))
+
+# expand list based on number of reps
+pred.listfull <- data.frame()
+for(i in 1:dim(pred.listin)[1]) {
+  # print(i)
+  
+  for(j in 1:pred.listin[i,]$pred_reps) {
+    print(pred.listin[i,])
+    list.out <- data.frame(cbind(pred.listin[i,],rep=j))
+    
+    pred.listfull <- rbind(pred.listfull,list.out)
+  }
+  
+}
+
+# can run just a subset
+pred.list <- pred.listfull 
+  # filter(!forest_climate=="future_future")
+
+# 2 time points for each: 2050, 2100
+# future climate (2 GCMs in 2050, 2100) x hx forest (1 set of predictors)
+# future forest under 2 disturbance scenarios (2 disturbance, in 2050, 2100) x hx climate (1 set of predictors)
+# also: future forest x future climate
+
+# read in hx climate, hx forest stdized predictors
+clim.hx <- read.csv(paste0("processed_data/iland_sdm_predictions/sdm_predictor_set_10m.csv")) %>%
+  dplyr::select(cell_id,mean_temp,summer_prec,rad) 
+
+# read in 10m resolution forest predictors, also include site predictors
+for.hx <- read.csv(paste0("processed_data/iland_sdm_predictions/sdm_predictor_set_10m.csv")) %>%
+  dplyr::select(c(id,cell_id,TSFdec,BA,prop_fasy,soil_fert,whc,sand))
+
+pred.resolution <- "10m"
+
+for(i in 1:dim(pred.list)[1]) {
+  print(i)
+  
+  # read in 10m resolution predictors
+  if(pred.list[i,]$forest_climate=="future_future") {
+    
+    # load and prep forest predictors
+    for.pred <- read.csv(paste0("iland/output/combined_outputs/",pred.list[i,]$pred_gcm,"_",pred.list[i,]$pred_wind,"_",pred.list[i,]$rep,"_forest_predictors.csv")) %>%
+      mutate(decade = ifelse(year==30, 2050,
+                             ifelse(year==80,2100,NA))) %>%
+      filter(decade %in% c(pred.list[i,]$pred_decade)) %>%
+      dplyr::select(c(cell_id,decade,lif,BA,prop_fasy)) 
+    
+    iland.pred <- clim.in %>%
+      filter(gcm==pred.list[i,]$pred_gcm,decade==pred.list[i,]$pred_decade) %>%
+      left_join(site.in, by=c("id_model")) %>%
+      left_join(for.pred, by=c("id_model"="cell_id","decade")) %>%
+      # assign 0s to NA forest structure values
+      mutate(across(c(BA), ~replace_na(.,0))) %>%
+      # assign 1 to lif when no forest
+      mutate(lif = replace_na(lif, 1)) %>%
+      # pivot longer forest predictors, rest already scaled
+      pivot_longer(c(BA,lif,prop_fasy)) %>%
+      left_join(scale.in, by="name") %>%
+      # rescale using original mean and sd
+      mutate(value_calc = (value-mean)/sd) %>%
+      dplyr::select(-c(value:sd)) %>%
+      pivot_wider(names_from="name",values_from="value_calc") %>%
+      rename(TSFdec=lif) %>%
+      # here replace NAs with 0 for prop_fasy, will be equal to original mean
+      mutate(across(c(prop_fasy), ~replace_na(.,0))) %>%
+      dplyr::select(-cell_id) %>%
+      # subset to sample
+      filter(id_model %in% c(samp.df$id_model)) 
+    
+  } else if(pred.list[i,]$forest_climate=="historical_future") {
+    # read in 10m resolution forest predictors, also include site predictors
+    for.pred <- for.hx
+    
+    iland.pred <- clim.in %>%
+      filter(gcm==pred.list[i,]$pred_gcm,decade==pred.list[i,]$pred_decade) %>%
+      left_join(for.pred, by=c("id_model"="cell_id")) %>%
+      # subset to sample
+      filter(id_model %in% c(samp.df$id_model))
+    
+  } else if(pred.list[i,]$forest_climate=="future_historical") {
+    
+    # future forest
+    for.pred <- read.csv(paste0("iland/output/combined_outputs/",pred.list[i,]$pred_gcm,"_",pred.list[i,]$pred_wind,"_",pred.list[i,]$rep,"_forest_predictors.csv")) %>%
+      mutate(decade = ifelse(year==30, 2050,
+                             ifelse(year==80,2100,NA))) %>%
+      filter(decade %in% c(pred.list[i,]$pred_decade)) %>%
+      dplyr::select(c(cell_id,decade,lif,BA,prop_fasy)) 
+    
+    # historical climate
+    clim.pred <- clim.hx
+    
+    iland.pred <- clim.pred %>%
+      left_join(site.in, by=c("cell_id")) %>%
+      left_join(for.pred, by=c("cell_id")) %>%
+      # assign 0s to NA forest structure values
+      mutate(across(c(BA), ~replace_na(.,0))) %>%
+      # assign 1 to lif when no forest
+      mutate(lif = replace_na(lif, 1)) %>%
+      # pivot longer forest only, rest already scaled
+      pivot_longer(c(BA,lif,prop_fasy)) %>%
+      left_join(scale.in, by="name") %>%
+      # rescale using original mean and sd
+      mutate(value_calc = (value-mean)/sd) %>%
+      dplyr::select(-c(value:sd)) %>%
+      pivot_wider(names_from="name",values_from="value_calc") %>%
+      rename(TSFdec=lif) %>%
+      # here replace NAs with 0 for prop_fasy, will be equal to original mean
+      mutate(across(c(prop_fasy), ~replace_na(.,0))) %>%
+      mutate(gcm = "historical") %>%
+      dplyr::select(-cell_id) %>%
+      # subset to sample
+      filter(id_model %in% c(samp.df$id_model))
+    
+  } else if(pred.list[i,]$forest_climate=="historical_historical") {
+    # read in 10m resolution forest predictors, also include site predictors
+    iland.pred <- read.csv(paste0("processed_data/iland_sdm_predictions/sdm_predictor_set_10m.csv")) %>%
+      dplyr::select(c(cell_id,TSFdec,BA,prop_fasy,soil_fert,whc,sand,mean_temp,summer_prec,rad)) %>%
+      rename(id_model=cell_id) %>%
+      # subset to strat sample
+      filter(id_model %in% c(samp.df$id_model))
+
+  }
+  
+  ### first predict cover
+  load("processed_data/understory_model/final_fits/mem_prediction_cover/cover_final.RData")
+  
+  cover.pred <- iland.pred
+  
+  cover.pred$cover_pct <- predict(final.mod, newdata=cover.pred)
+  
+  cover.out <- cover.pred %>%
+    dplyr::select(id_model,cover_pct)
+  
+  # clean up
+  rm(cover.pred)
+  
+  ### next species responses
+  
+  sdm.out <- data.frame()
+  
+  # loop through all species
+  for(k in c(list.files("processed_data/understory_model/final_fits/sdm_prediction_fits", full.names = TRUE))) {
+    
+    print(k)
+    
+    load(k) 
+    
+    sp_name <- as.data.frame(k) %>%
+      separate(k, into=c("dir1","dir2","dir3","dir4","name"), sep="/") %>%
+      separate(name, into=c("species_name","suf"), sep=".RD")
+    
+    # make individual sdm prediction
+    sdm.pred <- iland.pred %>%
+      mutate(species_name = sp_name$species_name)
+    sdm.pred$rf_pred <- predict(rf.mod, newdata=sdm.pred)
+    
+    # subset
+    sdm.temp <- sdm.pred %>%
+      dplyr::select(c(id_model,species_name,rf_pred)) 
+    
+    # add to output
+    sdm.out <- rbind(sdm.out, sdm.temp)
+    
+  }
+  
+  ### richness
+  # uncorrected 
+  rich.id <- sdm.out %>%
+    filter(species_name %in% c(pres.sub$species_name)) %>%
+    group_by(id_model) %>%
+    summarise(raw_richness=sum(rf_pred)) %>%
+    arrange(id_model)
+  
+  # corrected
+  sdm.rich <- sdm.out %>%
+    left_join(rich.lookup, by="species_name") %>%
+    dplyr::select(-c(species_name)) %>%
+    pivot_wider(names_from="species_alt", values_from="rf_pred") %>%
+    arrange(id_model) %>%
+    dplyr::select(-id_model)
+  
+  prob.stack <- rowSums(sdm.rich)
+  
+  # correct test data probabilities using probability stack predictions
+  prob.corr.probsum.df <- data.frame( apply(sdm.rich,2,FUN=function(x){invlogit(logit(x)+adj.par.nll$par[1]*prob.stack+adj.par.nll$par[2])}))
+  
+  # probability ranking rule, using sums of corrected probabilities as constraint
+  prr.corr.probsum.df <- SESAM.prr(prob.corr.probsum.df, data.frame(rowSums(prob.corr.probsum.df)) )
+  rich.id$corr_richness <- rowSums(prr.corr.probsum.df) # corrected richness
+  
+  ### ellenberg
+  # corrected
+  # prr predictions
+  sdm.corr <- rich.id %>%
+    dplyr::select(id_model) %>%
+    cbind(prr.corr.probsum.df) %>%
+    pivot_longer(-id_model) %>%
+    left_join(rich.lookup, by=c("name"="species_alt")) %>%
+    dplyr::select(-name) %>%
+    rename(rf_pred=value)
+  
+  ellen.corr <- ellen_compute(sdm.corr, unique(pres.sub$species_name)) %>%
+    pivot_wider(names_from="name",values_from="value",names_prefix = "corr_")
+  
+  plots.out <- rich.id %>%
+    # left_join(ellen.uncorr, by="id_model") %>%
+    left_join(ellen.corr, by="id_model") %>%
+    dplyr::select(-raw_richness) %>%
+    left_join(cover.out, by="id_model") 
+    # left_join(iland.predout, by="id_model")
+  
+  write.csv(plots.out, paste0("processed_data/iland_sdm_predictions/rand_sample_predictions/",pred.list[i,]$pred_forest,"Forest_",pred.list[i,]$pred_climate,"Climate_",pred.list[i,]$pred_gcm,"_",pred.list[i,]$pred_wind,"_",pred.list[i,]$rep,"_",pred.list[i,]$pred_decade,"_plot.csv"),row.names=FALSE)
+            
+  # clean up
+  rm(for.pred)
+  rm(iland.pred)
+  gc()
+  
+  
+}
+
+```

@@ -1,0 +1,198 @@
+---
+title: "Future climate and site predictors"
+author: "Kristin Braziunas"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = '../')
+```
+
+```{r full-script, eval=FALSE}
+#####
+# 
+## Step 8: compile future climate and site predictors
+#
+#####
+
+### libraries
+library(tidyverse) 
+library(RSQLite)
+library(dbplyr)
+
+### wd is one level up, recommend set up Rproj or:
+# setwd("../")
+
+### selected sessionInfo()
+# R version 4.1.3 (2022-03-10)
+# Platform: x86_64-w64-mingw32/x64 (64-bit)
+# Running under: Windows 10 x64 (build 17763)
+# 
+# attached base packages:
+#   [1] stats     graphics  grDevices utils     datasets  methods   base     
+# 
+# other attached packages:
+#   [1] dbplyr_2.1.1    RSQLite_2.2.10  forcats_0.5.1   stringr_1.4.1   dplyr_1.0.8     purrr_0.3.4     readr_2.1.2    
+# [8] tidyr_1.2.0     tibble_3.1.6    ggplot2_3.3.5   tidyverse_1.3.1
+
+###
+# 1. prep site data
+###
+
+### site
+# site is constant
+site.in <- read.csv("processed_data/iland_sdm_predictions/sdm_predictor_set_10m.csv") %>%
+  # set generically named id column
+  mutate(id_model = cell_id) %>%
+  dplyr::select(c(id,cell_id,id_model,sand,whc,soil_fert))
+
+write.csv(site.in, "processed_data/iland_clim_soils/future_predictors/sdm_predictor_set_site_10m.csv", row.names=FALSE)
+
+###
+# 2. load climate data
+###
+
+### climate
+# 10 yrs prior to 2050, 2100 in each gcm
+list.files("iland/database/", pattern="rcp",full.names = TRUE)
+
+# annual
+clim.out <- data.frame()
+
+for(j in list.files("iland/database/", pattern="rcp",full.names = TRUE)) {
+  print(j) 
+  
+  clim.name <- as.data.frame(j) %>%
+    separate(j, into=c("dir1","dir2","name"), sep="/") %>%
+    separate(name, into=c("gcm","suf"), sep="\\.")
+  
+  conn <-
+    DBI::dbConnect(RSQLite::SQLite(),
+                   dbname = j) # connect to the db
+  dbListTables(conn)
+  
+  for(i in 1:length(dbListTables(conn))) {
+    print(dbListTables(conn)[i]) 
+    
+    table.in <- dbListTables(conn)[i]
+    # previously identified climate tables with missing data
+    if(table.in %in% c("climate118","climate296","climate492","climate770","climate786")) next
+    
+    # read and summarize climate normals
+    clim.in <- tbl(conn, table.in) %>%
+      filter(year %in% c(2041:2050,2091:2100)) %>%
+      mutate(table_name = table.in) %>%
+      # mean_temp, daily_range for isothermality
+      mutate(mean_temp = (min_temp + max_temp)/2,
+             daily_range = max_temp-min_temp) %>%
+      # annual values: mean temp, rad, daily range
+      group_by(table_name,year) %>%
+      summarise(mean_temp = mean(mean_temp),rad=mean(rad),daily_range = mean(daily_range)) %>%
+      collect() %>%
+      mutate(gcm = clim.name$gcm) 
+    
+    clim.out <- rbind(clim.out,clim.in)
+  }
+  dbDisconnect(conn) # close the connection
+}
+
+clim.ann <- clim.out
+
+# monthly
+clim.out <- data.frame()
+
+for(j in list.files("iland/database/", pattern="rcp",full.names = TRUE)) {
+  print(j)
+  
+  clim.name <- as.data.frame(j) %>%
+    separate(j, into=c("dir1","dir2","name"), sep="/") %>%
+    separate(name, into=c("gcm","suf"), sep="\\.")
+  
+  conn <-
+    DBI::dbConnect(RSQLite::SQLite(),
+                   dbname = j) # connect to the db
+  dbListTables(conn)
+  
+  for(i in 1:length(dbListTables(conn))) {
+    print(dbListTables(conn)[i]) 
+    
+    table.in <- dbListTables(conn)[i]
+    # previously identified climate tables with missing data
+    if(table.in %in% c("climate118","climate296","climate492","climate770","climate786")) next
+    
+    # read and summarize climate normals
+      clim.in <- tbl(conn, table.in) %>%
+      filter(year %in% c(2041:2050,2091:2100)) %>%
+      mutate(table_name = table.in) %>%
+      # monthly values
+      group_by(table_name,year, month) %>%
+      summarise(min_temp = mean(min_temp), max_temp=mean(max_temp), prec=sum(prec)) %>%
+      collect() %>%
+      mutate(gcm = clim.name$gcm) 
+    
+    clim.out <- rbind(clim.out,clim.in)
+  }
+  dbDisconnect(conn) # close the connection
+}
+
+clim.month <- clim.out
+
+###
+# 3. prep climate predictors
+###
+
+# summer precip, seas_range_prec
+clim.seas <- clim.month %>%
+  # add season flag
+  mutate(season = ifelse(month %in% c(1,2,12),"winter",
+                         ifelse(month %in% c(3:5),"spring",
+                                ifelse(month %in% c(6:8),"summer",
+                                       ifelse(month %in% c(9:11),"fall",NA))))) %>%
+  # mean temp and precip sums by season
+  group_by(gcm,table_name,year,season) %>%
+  summarise(prec=sum(prec)) %>%
+  # pivot so seasons are columns
+  pivot_wider(names_from="season",values_from=c("prec")) %>%
+  rename(summer_prec = summer, winter_prec = winter) %>%
+  mutate(seas_range_prec = summer_prec - winter_prec) %>%
+  # remove unneeded values
+  dplyr::select(c(gcm,table_name,year,summer_prec,seas_range_prec))
+
+# range_temp for isothermality
+clim.avgmonth <- clim.month %>%
+  # annual values first
+  group_by(gcm,table_name,year) %>%
+  summarise(min_month_temp = min(min_temp),
+            max_month_temp = max(max_temp),
+            range_temp = max_month_temp - min_month_temp) 
+
+# combine with annual values, calculate 10-yr normals
+# also calc isothermality
+clim.pred <- clim.ann %>%
+  # add monthly and seasonal values
+  left_join(clim.avgmonth, by=c("gcm","table_name","year")) %>%
+  left_join(clim.seas, by=c("gcm","table_name","year")) %>%
+  # add isothermality
+  mutate(isotherm = daily_range/range_temp) %>%
+  # add decade
+  mutate(decade = ifelse(year %in% c(2041:2050),2050,
+                         ifelse(year %in% c(2091:2100),2100,NA))) %>%
+  # calc 10-yr norms
+  ungroup() %>%
+  group_by(gcm,table_name,decade) %>%
+  summarise_all(mean) %>%
+  dplyr::select(gcm,table_name,decade,mean_temp,summer_prec,rad)
+
+# match up with 10m cell ids
+env.in <- read.table("iland/gis/environment.txt", header=TRUE) %>%
+  dplyr::select(c(id,model.climate.tableName))
+
+clim.predout <- site.in %>%
+  dplyr::select(c(id,cell_id,id_model)) %>%
+  left_join(env.in, by="id") %>%
+  left_join(clim.pred, by=c("model.climate.tableName" = "table_name")) %>%
+  dplyr::select(-model.climate.tableName)
+
+write.csv(clim.predout, "processed_data/iland_clim_soils/future_predictors/sdm_predictor_set_climate_10m.csv",row.names=FALSE)
+```
