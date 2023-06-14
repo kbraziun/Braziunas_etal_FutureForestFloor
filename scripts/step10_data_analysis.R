@@ -58,6 +58,9 @@ pred.hx <- read.csv("processed_data/iland_sdm_predictions/sdm_predictor_set_nosp
 # future responses
 resp.fut <- read.csv("processed_data/iland_sdm_predictions/future_prediction_summaries/scenario_mean_cv.csv")
 
+# future responses: spatial
+sp.in <- read.csv("processed_data/iland_sdm_predictions/future_prediction_summaries/spatial_response_change.csv")
+
 # lost species
 lost.fut <- read.csv("processed_data/iland_sdm_predictions/future_prediction_summaries/scenario_species_lost.csv")
 
@@ -446,6 +449,40 @@ samp.climchange %>%
   geom_smooth(method="loess", se=FALSE) +
   theme_bw()
 
+### group richness and thermophilization responses by elevation zone
+head(resp.hx) # historical
+head(sp.in) # future
+
+# hx mean by elev group
+hx.elev <- resp.hx %>%
+  dplyr::select(c(id_model,corr_richness,corr_T)) %>%
+  left_join(elev.in, by="id_model") %>%
+  mutate(elev_group = ifelse(elev_m<850,"submontane",
+                             ifelse(elev_m>850 & elev_m<1400,"montane",
+                                    ifelse(elev_m>1400,"subalpine",NA)))) %>%
+  group_by(elev_group) %>%
+  summarise(mean_richness = mean(corr_richness),
+            mean_T = mean(corr_T)) %>%
+  pivot_longer(c(mean_richness,mean_T), values_to="hx_mean")
+
+# future mean by elev group
+sp.elev <- sp.in %>%
+  dplyr::select(c(id_model,pred_decade,mean_richness,mean_T)) %>%
+  left_join(elev.in, by="id_model") %>%
+  mutate(elev_group = ifelse(elev_m<850,"submontane",
+                             ifelse(elev_m>850 & elev_m<1400,"montane",
+                                    ifelse(elev_m>1400,"subalpine",NA)))) %>%
+  group_by(elev_group,pred_decade) %>%
+  summarise(mean_richness = mean(mean_richness),
+            mean_T = mean(mean_T)) %>%
+  pivot_longer(c(mean_richness,mean_T), values_to="fut_mean")
+
+# difference by elevation group
+sp.elev %>%
+  left_join(hx.elev, by=c("elev_group","name")) %>%
+  mutate(diff = fut_mean-hx_mean,
+         rel_diff = diff/hx_mean * 100) 
+  
 
 ###	
 # Shifts in plant community composition with 21st century change
@@ -454,12 +491,12 @@ samp.climchange %>%
 # in life forms (winners/losers)
 # look at turnover (# retained, # new, # lost)
 
-# read in future data
-sp.in <- read.csv("processed_data/iland_sdm_predictions/future_prediction_summaries/spatial_response_change.csv")
+# use average future spatial responses
+head(sp.in)
 
 sp.in %>%
   group_by(pred_decade) %>%
-  summarise(turnover=mean(mean_turnover))
+  summarise(turnover=mean(mean_turnover)*100)
 
 # summarise by elevation
 sp.summ <- sp.in %>%
@@ -469,8 +506,10 @@ sp.summ <- sp.in %>%
                                     ifelse(elev_m>1400,"subalpine",NA)))) %>%
   # calculate proportions
   mutate(across(c(light_cold:shrub),~(.)/mean_richness),
-         turnover_lost = lost/(lost+new+retained),
-         turnover_new = new/(lost+new+retained)) %>%
+         # calculate turnover, multipy by 100 to get %
+         mean_turnover = mean_turnover*100,
+         turnover_lost = lost/(lost+new+retained)*100,
+         turnover_new = new/(lost+new+retained)*100) %>%
   # remove unused columns
   dplyr::select(-c(cv_richness,cv_T,cv_turnover,lost:retained)) %>%
   # mean and variance across space
@@ -502,7 +541,7 @@ sp.summ %>%
   pivot_wider(names_from="name", values_from="mean") %>%
   group_by(pred_decade,elev_group) %>%
   summarise(diff = mean_turnover - turnover_lost - turnover_new) %>%
-  summary() # slight difference in the 1000th place, ok for plotting
+  summary() # slight difference, ok for plotting
 
 # add historical
 sphx.summ <- resp.hx %>%
@@ -557,6 +596,10 @@ sp.out %>%
 0.176-0.0761 # 0.10 decline in light_cold
 (0.176-0.076)/0.176 # 57% decline
 
+# mean turnover
+sp.out %>%
+  filter(name=="mean_turnover")
+
 ### look at winners and losers in terms of life forms
 sp.out %>%
   filter(name %in% c("graminoid","herb","shrub","fern")) %>%
@@ -587,7 +630,7 @@ sp.out %>%
   facet_grid(~pred_decade) +
   geom_bar(stat="identity") +
   ylab("Species turnover") +
-  scale_y_continuous(expand=c(0,0), limits=c(0,1)) +
+  scale_y_continuous(expand=c(0,0), limits=c(0,100)) +
   scale_fill_manual(name="name",
                     values=c("#44AA99","#225555"),
                     labels=c("New species","Lost species")) +
