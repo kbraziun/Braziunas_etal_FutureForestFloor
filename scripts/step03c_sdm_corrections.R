@@ -30,7 +30,10 @@ library(poibin)
 ####
 
 # species subset: at least 5 observations. used for final model fits
-pres.in <- read.csv("processed_data/understory_model/understory_subset_presence_cover.csv") %>%
+# add flag for auc>0.7 cutoff
+rich.flag <- "subset"
+# rich.flag <- "auc07"
+pres.in <- read.csv(paste0("processed_data/understory_model/understory_",rich.flag,"_presence_cover.csv")) %>%
   dplyr::select(-cover)
 
 # richness of subset
@@ -130,7 +133,7 @@ mod.pred <- "9"
 train.out <- read.csv(paste0("processed_data/understory_model/evaluation/sdm_pres_evaluation_",run_nbr,".csv"))
 
 # MEM holdout test predictions
-rich.test <- read.csv(paste0("processed_data/understory_model/evaluation/",mod.name,"_richness_evaluation_",mod.pred,"pred.csv"))
+rich.test <- read.csv(paste0("processed_data/understory_model/evaluation/",mod.name,"_richness_",rich.flag,"_evaluation_",mod.pred,"pred.csv"))
 
 head(train.out)
 
@@ -252,8 +255,8 @@ for(i in 1:20) {
   
 }
 
-write.csv(rich.out, paste0("processed_data/understory_model/evaluation/corrected_richness_evaluation_",run_nbr,".csv"), row.names=FALSE)
-write.csv(pred.corrprr, paste0("processed_data/understory_model/evaluation/sdm_corrprr_evaluation_",run_nbr,".csv"), row.names=FALSE)
+write.csv(rich.out, paste0("processed_data/understory_model/evaluation/corrected_richness_",rich.flag,"_evaluation_",run_nbr,".csv"), row.names=FALSE)
+write.csv(pred.corrprr, paste0("processed_data/understory_model/evaluation/sdm_corrprr_",rich.flag,"_evaluation_",run_nbr,".csv"), row.names=FALSE)
 
 ####
 # 5. final corrections for prediction
@@ -284,7 +287,7 @@ set.seed(11)
 adj.par.nll <- optim(par=c(0,0), fn=nLL.Calabrese, sr= rich.trainrun$richness, probs= sp.trainrun) 
 
 # save this
-save(adj.par.nll, file="processed_data/understory_model/final_fits/richness_prediction_corrections/richness_corrections.RData")
+save(adj.par.nll, file=paste0("processed_data/understory_model/final_fits/richness_prediction_corrections/richness_",rich.flag,"_corrections.RData"))
 
 ### double check implementation, using training data
 # correct test data probabilities using probability stack predictions

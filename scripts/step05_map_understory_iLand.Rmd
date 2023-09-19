@@ -449,7 +449,10 @@ pred.resolution <- "10m"
 
 ### read in reference data
 # only species in 5 or more plots
-pres.sub <- read.csv("processed_data/understory_model/understory_subset_presence_cover.csv")
+# add auc flag
+rich.flag <- "subset"
+# rich.flag <- "auc07"
+pres.sub <- read.csv(paste0("processed_data/understory_model/understory_",rich.flag,"_presence_cover.csv"))
 # names lookup
 pft.in <- read.csv("processed_data/species_lookup/final_pft_categories_ms.csv") %>%
   rename(pft_new=pft) %>%
@@ -457,7 +460,7 @@ pft.in <- read.csv("processed_data/species_lookup/final_pft_categories_ms.csv") 
 # ellenberg lookup
 ellen.in <- read.xlsx("processed_data/species_lookup/species_lookup_ellenberg.xlsx", sheet="species_lookup_ellenberg")
 # richness corrections
-load("processed_data/understory_model/final_fits/richness_prediction_corrections/richness_corrections.RData")
+load(paste0("processed_data/understory_model/final_fits/richness_prediction_corrections/richness_",rich.flag,"_corrections.RData"))
 # species lookup for richness corrections
 rich.lookup <- data.frame(species_name = unique(pres.sub$species_name)) %>%
   mutate(species_alt = gsub("[_.-]","",species_name))
@@ -555,13 +558,18 @@ foreach(h=unique(iland.pred$chunk),
     
     print(k)
     
-    load(k)
-    
     sp_name <- as.data.frame(k) %>%
       separate(k, into=c("dir1","dir2","dir3","dir4","name"), sep="/") %>%
       separate(name, into=c("species_name","suf"), sep=".RD")
+    
+    # only predict for species in selected subset
+    if(!sp_name$species_name %in% c(pres.sub$species_name)) {
+      next
+    }
 
     # make individual sdm prediction
+    load(k)
+    
     sdm.pred <- iland.predsub %>%
       mutate(species_name = sp_name$species_name)
     sdm.pred$rf_pred <- predict(rf.mod, newdata=sdm.pred)
@@ -647,14 +655,14 @@ foreach(h=unique(iland.pred$chunk),
     left_join(life.count, by="id_model")
   
   ### write out
-  # species
-  write.csv(sdm.corr, paste0("processed_data/iland_sdm_predictions/historical_predictions_10m/sdm_predictions_species_",pred.resolution,"_chunk_",h,".csv"),row.names=FALSE)
+  # species, comment out for AUC>0.7
+  write.csv(sdm.corr, paste0("processed_data/iland_sdm_predictions/historical_predictions_10m/",rich.flag,"/sdm_predictions_species_",pred.resolution,"_chunk_",h,".csv"),row.names=FALSE)
   
   # species sums
-  write.csv(species.out, paste0("processed_data/iland_sdm_predictions/historical_predictions_10m/sdm_predictions_speciesSums_",pred.resolution,"_chunk_",h,".csv"),row.names=FALSE)
+  write.csv(species.out, paste0("processed_data/iland_sdm_predictions/historical_predictions_10m/",rich.flag,"/sdm_predictions_speciesSums_",pred.resolution,"_chunk_",h,".csv"),row.names=FALSE)
   
   # plots
-  write.csv(plots.out, paste0("processed_data/iland_sdm_predictions/historical_predictions_10m/sdm_predictions_plot_",pred.resolution,"_chunk_",h,".csv"),row.names=FALSE)
+  write.csv(plots.out, paste0("processed_data/iland_sdm_predictions/historical_predictions_10m/",rich.flag,"/sdm_predictions_plot_",pred.resolution,"_chunk_",h,".csv"),row.names=FALSE)
   
   # end.time = Sys.time()
   
@@ -726,6 +734,5 @@ for(i in unique(iland.pred$name)) {
 }
 
 writeRaster(rast.out[[-1]], filename=paste0("processed_data/iland_sdm_predictions/prediction_rasters_",res,".tif"),overwrite=TRUE)
-
 
 ```

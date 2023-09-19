@@ -9,7 +9,6 @@ knitr::opts_knit$set(root.dir = '../')
 ```
 
 ```{r full-script, warning=FALSE, message=FALSE}
-
 #####
 # 
 ## Step 1: Prepare/clean BGD understory data
@@ -54,7 +53,7 @@ library(ggpubr)
 # plot info
 plots.in <- read.table("data/BGD/NP_BGD_Biodiv_Alm_study_sites_UTM32.xls", header = TRUE, sep=";") %>%
   rename(plot_id=plot) %>%
-  dplyr::select(c(plot_id,category))
+  dplyr::select(c(plot_id,category,elev_class))
 
 # species lookup by growth form
 spec.in <- read.xlsx("processed_data/species_lookup/species_lookup_lifeform_filled.xlsx", sheet="Sheet1")
@@ -86,6 +85,10 @@ veg.in <- read.xlsx("data/BGD/biodiv_vegetation_2021.xlsx", sheet="Vegetationsda
 unique(veg.in$Schicht)
 veg.in %>%
   filter(Schicht=="Baumschicht 2") # 3 entries: Soldanella alpina, Salix eleagnos, Clematis vitalba
+
+### load model fit evaluations for additional subsetting
+# output from step04_model_evaluation.R
+spec.auc <- read.csv("processed_data/understory_model/evaluation/species_evaluation_auc_run13.csv")
 
 ###
 # 2. review species names, combine as needed
@@ -325,6 +328,77 @@ red.pres <- veg.subout %>%
 # # write out, commented out for Rmd
 # write.csv(red.pres, "processed_data/understory_model/understory_subset_presence_cover.csv",row.names=FALSE)
 
+### consider a subset of the species list based on model fit
+# use AUC threshold of 0.7, only retaining models with fair to excellent fit
+
+# drop entries not clearly identified to species level or in 1 case, unable to be 
+# differentiated from other species in same "agg." group
+veg.auc07 <- spec.auc %>%
+  filter(auc >= 0.7)
+unique(veg.auc07$species_name)
+# 174 species
+
+veg.auc07red <- veg.new %>%
+  filter(species_name %in% c(veg.auc07$species_name))
+
+# how much of total cover is represented by these species?
+totc.auc07red <- veg.auc07red %>%
+  ungroup() %>%
+  # add richness count
+  mutate(count=1) %>%
+  group_by(plot_id) %>%
+  summarise(tot_cover_red = sum(cover),
+            red_richness=sum(count)) %>%
+  # join with total
+  left_join(totc.full, by="plot_id") %>%
+  # pct of total
+  mutate(tot_cover_pct = tot_cover_red/tot_cover_all * 100,
+         richness_pct = red_richness/tot_richness * 100)
+
+summary(totc.auc07red) # captures 18-89% of total cover, mean 59%, 46-86 % of total richness with "spec." excluded, mean 64%
+# if using AUC>0.8 as cutoff, richness drops to 12-54% of total, mean 30%
+
+totc.auc07red %>%
+  ggplot(aes(x=tot_cover_all, y=tot_cover_red)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+  stat_cor(method="pearson", cor.coef.name="r", p.digits=NA, label.sep="") +
+  theme_bw()
+# r=0.74
+
+totc.auc07red %>%
+  ggplot(aes(x=tot_richness, y=red_richness)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+  stat_cor(method="pearson", cor.coef.name="r", p.digits=NA, label.sep="") +
+  theme_bw()
+# r=0.94
+# average richness is much lower, but still highly correlated
+# if use AUC>0.8 as cutoff, correlation drops to r=0.76
+
+# write out data
+veg.auc07out <- veg.auc07red %>%
+  ungroup() %>%
+  tidyr::expand(plot_id,species_name) %>%
+  left_join(veg.red, by=c("plot_id","species_name")) %>%
+  # remove growth form
+  dplyr::select(-c(PlantGrowthForm,include)) %>%
+  # replace NA with 0s
+  mutate(across(starts_with("cover"), ~replace_na(., 0)))
+
+# double ck
+sum(veg.auc07red$cover)
+sum(veg.auc07out$cover)
+
+# output for presence
+auc07.pres <- veg.auc07out %>%
+  mutate(pres = ifelse(cover>0,1,0)) %>%
+  dplyr::select(c(plot_id,species_name,pres)) %>%
+  left_join(veg.auc07out, by=c("plot_id","species_name"))
+
+# # write out, commented out for Rmd
+# write.csv(auc07.pres, "processed_data/understory_model/understory_auc07_presence_cover.csv",row.names=FALSE)
+
 
 ### look at representation of red list species
 
@@ -376,6 +450,28 @@ red.pres %>%
 # 9 RLB, 12 RLD
 # 23 rare/warning
 
+# how many red list in AUC>0.7 version
+auc07.pres %>%
+  filter(pres !=0) %>%
+  # mutate(species_name = gsub("_"," ",species_name)) %>%
+  left_join(new.names, by=c("species_name"="species_name_model")) %>%
+  left_join(veg.in, by=c("plot_id","species_name_field"="species_name")) %>%
+  group_by(species_name) %>%
+  # just take first entry
+  slice(1) %>%
+  # red list and current hazard, from BIB website
+  mutate(RLB = ifelse(RLB %in% c("3","G","2"),"endangered",
+                      ifelse(RLB %in% c("R"),"rare",
+                             ifelse(RLB %in% c("V"),"warning",NA))),
+         RLD = ifelse(RLD %in% c("3","2","G"),"endangered",
+                      ifelse(RLD %in% c("R"),"rare",
+                             ifelse(RLD %in% c("V"),"warning",NA)))) %>%
+  group_by(RLB,RLD) %>%
+  tally()
+
+# 9 RLB, 8 RLD
+# 15 rare/warning
+
 # save this
 veg.in %>%
   left_join(new.names, by=c("species_name"="species_name_field")) %>%
@@ -390,7 +486,7 @@ veg.in %>%
                       ifelse(RLD %in% c("R"),"rare",
                              ifelse(RLD %in% c("V"),"warning","not_on_list")))) %>%
   dplyr::select(c(species_name_model,RLB,RLD)) %>%
-  rename(species_name=species_name_model) # %>%, commented out for Rmd
+  rename(species_name=species_name_model) # %>% commented out for Rmd
   # write.csv("processed_data/species_lookup/red_list_status.csv", row.names=FALSE)
 
 ###
@@ -403,11 +499,16 @@ cover.tot <- veg.complete %>%
   group_by(plot_id) %>%
   summarise(cover_pct = sum(cover))
 
-## write out commented out for Rmd
+# commented out for Rmd
 # write.csv(cover.tot, "processed_data/understory_model/plot_cover.csv",row.names=FALSE)
 
 ### richness: only for species subset
 rich.tot <- red.pres %>%
+  ungroup() %>%
+  group_by(plot_id) %>%
+  summarise(richness = sum(pres))
+
+rich.auc07tot <- auc07.pres %>%
   ungroup() %>%
   group_by(plot_id) %>%
   summarise(richness = sum(pres))
@@ -434,6 +535,8 @@ ellen.names <- new.names %>%
 veg.dataset <- veg.complete
 veg.dataset <- veg.complete %>%
   filter(species_name %in% c(red.pres$species_name))
+veg.dataset <- veg.complete %>%
+  filter(species_name %in% c(auc07.pres$species_name))
 
 # match up species name with ellenberg
 ellen.cover <- veg.dataset %>%
@@ -481,6 +584,8 @@ ellen.plotprep %>%
 7833/8001 # includes 98% of observations
 # 7486 in reduced version
 7475/8001 # 93.4% of observations
+# 4995 in AUC>0.7 version
+4995/8001 # 62% of observations
 
 # function to compute ellenberg mean and wtmean licht, T, F, N for given set of species
 ellen_compute <- function(df.in, sp.list) {
@@ -519,6 +624,7 @@ ellen.complete %>%
   theme_bw()
 
 ellen.subset <- ellen_compute(veg.complete, red.pres$species_name)
+# ellen.subset <- ellen_compute(veg.complete, auc07.pres$species_name) # also check with AUC>0.7 subset
 
 ellen.subset %>%
   ggplot(aes(x=wtmean, y=mean)) +
@@ -620,8 +726,21 @@ ellen.out <- ellen.subset %>%
   left_join(rich.tot, by="plot_id") %>%
   pivot_longer(c(F:richness))
 
-### write out commented out for Rmd
+# commented out for Rmd
 # write.csv(ellen.out, "processed_data/understory_model/plot_subset_richness_ellenberg.csv", row.names=FALSE)
+
+### also write out for AUC>0.7
+ellen.auc07subset <- ellen_compute(veg.complete, auc07.pres$species_name) 
+
+ellen.auc07out <- ellen.auc07subset %>%
+  dplyr::select(-wtmean) %>%
+  pivot_wider(names_from="OriglName", values_from="mean") %>%
+  left_join(rich.auc07tot, by="plot_id") %>%
+  pivot_longer(c(F:richness))
+
+# commented out for Rmd
+# write.csv(ellen.auc07out, "processed_data/understory_model/plot_auc07_richness_ellenberg.csv", row.names=FALSE)
+
 
 ###
 # 6. characterize functional groups
@@ -842,7 +961,7 @@ pft.sp <- func.fin %>%
   mutate(pft = paste(ht_cat,pft1,pft2,sep="-")) %>%
   dplyr::select(-c(pft1,pft2))
 
-### write commented out for Rmd
+# commented out for Rmd
 # write.csv(pft.sp, "processed_data/species_lookup/full_pft_categories.csv",row.names=FALSE)
 
 # final pft cats for paper
@@ -865,8 +984,95 @@ pft.ms <- func.fin %>%
   filter(species_name %in% c(veg.sub$species_name)) %>%
   dplyr::select(-c(pft1,pft2,cover,pres,licht_cat,temp_cat,lifeHistory,ht_cat))
 
-### write commented out for Rmd
+# commented out for Rmd
 # write.csv(pft.ms, "processed_data/species_lookup/final_pft_categories_ms.csv",row.names=FALSE)
 
+# check pft coverage for different subsets of data
+pft.cks <- func.fin %>%
+  filter(!grepl("spec.",species_name,fixed=TRUE)) %>%
+  # remove unneeded columns
+  dplyr::select(-c(TRYSpeciesID,Comments)) %>%
+  # put nas into indiff cats, not needed so leave these out for now
+  # mutate(licht_cat = ifelse(is.na(licht_cat),"shade-tol-indiff",licht_cat),
+  #        temp_cat = ifelse(is.na(temp_cat),"indiff",temp_cat)) %>%
+  # add shorthand pft names
+  mutate(pft1 = ifelse(licht_cat=="light-pref","light",
+                       ifelse(licht_cat=="shade-tol-indiff","shade",NA)),
+         pft2 = ifelse(temp_cat=="indiff","notemp",
+                       ifelse(temp_cat=="subalpine-alpine","cold",
+                              ifelse(temp_cat=="submontane-montane","warm",NA)))) %>%
+  mutate(prevalence = pres/150,
+         pft = paste(pft1,pft2,sep="_")) %>%
+  dplyr::select(-c(pft1,pft2,cover,pres,licht_cat,temp_cat,lifeHistory,ht_cat))
+
+out.pres %>% 
+  left_join(pft.cks, by="species_name") %>%
+  filter(pft != "NA-NA") %>%
+  group_by(plot_id) %>%
+  mutate(tot_richness = sum(pres)) %>%
+  ungroup() %>%
+  group_by(plot_id,pft) %>%
+  summarise(pres=sum(pres), tot_richness=mean(tot_richness)) %>%
+  left_join(plots.in, by="plot_id") %>%
+  ungroup() %>%
+  # group_by(elev_class,pft) %>%
+  group_by(pft) %>%
+  summarise(across(c(pres,tot_richness),~mean(.))) %>%
+  mutate(prop = pres/tot_richness) %>%
+  # mutate(elev_class = factor(elev_class,levels=c("submontan","montan","subalpin"))) %>%
+  mutate(pft=factor(pft,levels=c("light_cold","shade_cold","light_notemp","shade_notemp","light_warm","shade_warm"))) %>%
+  # ggplot(aes(x=elev_class,y=prop, fill=pft)) +
+  ggplot(aes(x=1,y=prop, fill=pft)) +
+  geom_bar(stat="identity") +
+  scale_fill_manual(name="PFT",
+                    values=c("#a6cee3","#1f78b4","#ffff99","#b15928","#fdbf6f","#ff7f00")) +
+  theme_bw()
+
+red.pres %>% 
+  left_join(pft.cks, by="species_name") %>%
+  filter(pft != "NA-NA") %>%
+  group_by(plot_id) %>%
+  mutate(tot_richness = sum(pres)) %>%
+  ungroup() %>%
+  group_by(plot_id,pft) %>%
+  summarise(pres=sum(pres), tot_richness=mean(tot_richness)) %>%
+  left_join(plots.in, by="plot_id") %>%
+  ungroup() %>%
+  # group_by(elev_class,pft) %>%
+  group_by(pft) %>%
+  summarise(across(c(pres,tot_richness),~mean(.))) %>%
+  mutate(prop = pres/tot_richness) %>%
+  # mutate(elev_class = factor(elev_class,levels=c("submontan","montan","subalpin"))) %>%
+  mutate(pft=factor(pft,levels=c("light_cold","shade_cold","light_notemp","shade_notemp","light_warm","shade_warm"))) %>%
+  # ggplot(aes(x=elev_class,y=prop, fill=pft)) +
+  ggplot(aes(x=1,y=prop, fill=pft)) +
+  geom_bar(stat="identity") +
+  scale_fill_manual(name="PFT",
+                    values=c("#a6cee3","#1f78b4","#ffff99","#b15928","#fdbf6f","#ff7f00")) +
+  theme_bw()
+
+auc07.pres %>% 
+  left_join(pft.cks, by="species_name") %>%
+  filter(pft != "NA-NA") %>%
+  group_by(plot_id) %>%
+  mutate(tot_richness = sum(pres)) %>%
+  ungroup() %>%
+  group_by(plot_id,pft) %>%
+  summarise(pres=sum(pres), tot_richness=mean(tot_richness)) %>%
+  left_join(plots.in, by="plot_id") %>%
+  ungroup() %>%
+  # group_by(elev_class,pft) %>%
+  group_by(pft) %>%
+  summarise(across(c(pres,tot_richness),~mean(.))) %>%
+  mutate(prop = pres/tot_richness) %>%
+  # mutate(elev_class = factor(elev_class,levels=c("submontan","montan","subalpin"))) %>%
+  mutate(pft=factor(pft,levels=c("light_cold","shade_cold","light_notemp","shade_notemp","light_warm","shade_warm"))) %>%
+  # ggplot(aes(x=elev_class,y=prop, fill=pft)) +
+  ggplot(aes(x=1,y=prop, fill=pft)) +
+  geom_bar(stat="identity") +
+  scale_fill_manual(name="PFT",
+                    values=c("#a6cee3","#1f78b4","#ffff99","#b15928","#fdbf6f","#ff7f00")) +
+  theme_bw()
+# impact of AUC 0.7 is a slight overrepresentation of warm and cold-adapted species, underrepresentation of temperature-indifferent species. trend is clear overall, and this also exagerrates differences among elevation zones in terms of PFT representation (more distinct with this subset of species). 
 
 ```

@@ -35,7 +35,12 @@ library(PresenceAbsence)
 ### responses
 # presence full and subset
 pres.in <- read.csv("processed_data/understory_model/understory_presence_cover.csv")
-pres.sub <- read.csv("processed_data/understory_model/understory_subset_presence_cover.csv")
+
+# add flag for auc>0.7 cutoff
+rich.flag <- "subset"
+# rich.flag <- "auc07"
+pres.sub <- read.csv(paste0("processed_data/understory_model/understory_",rich.flag,"_presence_cover.csv")) %>%
+  dplyr::select(-cover)
 
 # cover and richness all species
 cover.in <- pres.in %>%
@@ -98,7 +103,7 @@ mod.pred <- "9"
 
 ### cover and richness test fits
 cover.test <- read.csv(paste0("processed_data/understory_model/evaluation/",mod.name,"_cover_evaluation_",mod.pred,"pred.csv"))
-rich.test <- read.csv(paste0("processed_data/understory_model/evaluation/",mod.name,"_richness_evaluation_",mod.pred,"pred.csv"))
+rich.test <- read.csv(paste0("processed_data/understory_model/evaluation/",mod.name,"_richness_",rich.flag,"_evaluation_",mod.pred,"pred.csv"))
 
 # quick plot assessment: mean fit
 cover.test %>%
@@ -179,7 +184,7 @@ cover.rcurves %>%
 # run
 run_nbr <- "run13"
 
-rich.out <- read.csv(paste0("processed_data/understory_model/evaluation/corrected_richness_evaluation_",run_nbr,".csv"))
+rich.out <- read.csv(paste0("processed_data/understory_model/evaluation/corrected_richness_",rich.flag,"_evaluation_",run_nbr,".csv"))
 
 # avg predicted richness
 rich.out %>%
@@ -202,7 +207,7 @@ rich.out %>%
   ) +
   theme_bw()
 
-# ggsave(paste0("figures/model_evaluation/corrected_richness_comparison_",run_nbr,".pdf"))
+# ggsave(paste0("figures/model_evaluation/corrected_richness_",rich.flag,"_comparison_",run_nbr,".pdf"))
 # model performance similar across all
 # corrected probability sums best match 1:1 line
 
@@ -425,13 +430,13 @@ ellen.test %>%
   ) +
   theme_bw()
 
-write.csv(ellen.test, paste0("processed_data/understory_model/evaluation/corrected_ellenberg_evaluation_",run_nbr,prr,".csv"),row.names=FALSE)
+write.csv(ellen.test, paste0("processed_data/understory_model/evaluation/corrected_ellenberg_",rich.flag,"_evaluation_",run_nbr,prr,".csv"),row.names=FALSE)
 
 ### evaluate impact of applying the probability ranking rule for individual species, plot-level predictions
 prr <- "prr"
 
 # prr, test data only
-train.out <- read.csv(paste0("processed_data/understory_model/evaluation/sdm_corrprr_evaluation_",run_nbr,".csv")) %>%
+train.out <- read.csv(paste0("processed_data/understory_model/evaluation/sdm_corrprr_",rich.flag,"_evaluation_",run_nbr,".csv")) %>%
   left_join(pres.in, by=c("plot_id","species_name")) %>%
   dplyr::select(-cover) %>%
   rename(rf_pred=prr_pres,
@@ -499,14 +504,14 @@ ellen.test %>%
   ) +
   theme_bw()
 
-write.csv(ellen.test, paste0("processed_data/understory_model/evaluation/corrected_ellenberg_evaluation_",run_nbr,prr,".csv"),row.names=FALSE)
+write.csv(ellen.test, paste0("processed_data/understory_model/evaluation/corrected_ellenberg_",rich.flag,"_evaluation_",run_nbr,prr,".csv"),row.names=FALSE)
 
 ###
 # 6. final fits: variable importance and response curves
 ###
 
 # read in
-rcurves.out <- read.csv("processed_data/understory_model/evaluation/sdm_pres_finalFit_rcurves_9pred.csv")
+rcurves.out <- read.csv("processed_data/understory_model/evaluation/sdm_pres_finalFit_rcurves_9pred.csv") 
 vimp.out <- read.csv("processed_data/understory_model/evaluation/sdm_pres_finalFit_vimp_9pred.csv")
 
 ### assessment for core group: species with 5 or more observations

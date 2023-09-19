@@ -38,7 +38,11 @@ cover.in <- read.csv("processed_data/understory_model/understory_presence_cover.
   summarise(cover=sum(cover))
 
 # richness of subset
-rich.in <- read.csv("processed_data/understory_model/understory_subset_presence_cover.csv") %>%
+# add flag for auc>0.7 cutoff
+rich.flag <- "subset"
+# rich.flag <- "auc07"
+
+rich.in <- read.csv(paste0("processed_data/understory_model/understory_",rich.flag,"_presence_cover.csv")) %>%
   group_by(plot_id) %>%
   summarise(richness=sum(pres))
 
@@ -68,10 +72,10 @@ pred.std <- pred.in %>%
 
 # set predictors, cover or richness
 pred.set <- pred.std
-resp.mod <- cover.in
-mod.name <- "cover"
-# resp.mod <- rich.in
-# mod.name <- "richness"
+# resp.mod <- cover.in
+# mod.name <- "cover"
+resp.mod <- rich.in
+mod.name <- "richness"
 npred <- ncol(pred.set) -1
 
 rf.data <- resp.mod %>%
@@ -137,13 +141,14 @@ for(i in c(1:20)) {
 if(mod.name=="cover") {
   test.eval <- test.out %>%
     dplyr::select(c(plot_id,cover,run,cover_pred))
+  # write out
+  write.csv(test.eval, paste0("processed_data/understory_model/evaluation/mem_",mod.name,"_evaluation_",npred,"pred.csv"),row.names=FALSE)
 } else if(mod.name=="richness") {
   test.eval <- test.out %>%
     dplyr::select(c(plot_id,richness,run,richness_pred))
+  # write out
+  write.csv(test.eval, paste0("processed_data/understory_model/evaluation/mem_",mod.name,"_",rich.flag,"_evaluation_",npred,"pred.csv"),row.names=FALSE)
 }
-
-# write out
-write.csv(test.eval, paste0("processed_data/understory_model/evaluation/mem_",mod.name,"_evaluation_",npred,"pred.csv"),row.names=FALSE)
 
 ###
 # 4. final MEM fit: cover only

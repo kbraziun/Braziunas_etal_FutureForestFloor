@@ -408,10 +408,14 @@ write.csv(site.in, &quot;processed_data/iland_clim_soils/future_predictors/sdm_p
 # 10 yrs prior to 2050, 2100 in each gcm
 list.files(&quot;iland/database/&quot;, pattern=&quot;rcp&quot;,full.names = TRUE)
 
+# read in either rcp 8.5 or 4.5
+# patt.in &lt;- &quot;rcp85&quot;
+patt.in &lt;- &quot;rcp45&quot;
+
 # annual
 clim.out &lt;- data.frame()
 
-for(j in list.files(&quot;iland/database/&quot;, pattern=&quot;rcp&quot;,full.names = TRUE)) {
+for(j in list.files(&quot;iland/database/&quot;, pattern=patt.in,full.names = TRUE)) {
   print(j) 
   
   clim.name &lt;- as.data.frame(j) %&gt;%
@@ -453,7 +457,7 @@ clim.ann &lt;- clim.out
 # monthly
 clim.out &lt;- data.frame()
 
-for(j in list.files(&quot;iland/database/&quot;, pattern=&quot;rcp&quot;,full.names = TRUE)) {
+for(j in list.files(&quot;iland/database/&quot;, pattern=patt.in,full.names = TRUE)) {
   print(j)
   
   clim.name &lt;- as.data.frame(j) %&gt;%
@@ -545,7 +549,7 @@ clim.predout &lt;- site.in %&gt;%
   left_join(clim.pred, by=c(&quot;model.climate.tableName&quot; = &quot;table_name&quot;)) %&gt;%
   dplyr::select(-model.climate.tableName)
 
-write.csv(clim.predout, &quot;processed_data/iland_clim_soils/future_predictors/sdm_predictor_set_climate_10m.csv&quot;,row.names=FALSE)</code></pre>
+write.csv(clim.predout, paste0(&quot;processed_data/iland_clim_soils/future_predictors/sdm_predictor_set_climate_&quot;,patt.in,&quot;_10m.csv&quot;),row.names=FALSE)</code></pre>
 
 
 

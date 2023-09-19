@@ -369,7 +369,7 @@ outputs</h1>
 #####
 
 # if running on server
-# write(&quot;TMP = &#39;temp&#39;&#39;&quot;, file = file.path(&#39;~/.Renviron&#39;))
+# write(&quot;TMPDIR=&#39;/mnt/public/temp/kbraziunas&#39;&quot;, file=file.path(&quot;~/.Renviron&quot;)) 
 
 ### load libraries
 library(tidyverse)
@@ -408,12 +408,19 @@ library(doParallel)
 # 1. read in predictor data
 ###
 
+### run specific rcp and auc flag
+rcp.flag &lt;- &quot;rcp85&quot;
+# rcp.flag &lt;- &quot;rcp45&quot;
+rich.flag &lt;- &quot;subset&quot;
+# rich.flag &lt;- &quot;auc07&quot;
+
+
 # read in scaling values
 scale.in &lt;- read.csv(&quot;processed_data/understory_model/final_fits/predictor_scaling/predictor_scaling_mean_sd.csv&quot;)
 
 # read in climate and site predictors, scale climate predictors
 site.in &lt;- read.csv(&quot;processed_data/iland_clim_soils/future_predictors/sdm_predictor_set_site_10m.csv&quot;)
-clim.in &lt;- read.csv(&quot;processed_data/iland_clim_soils/future_predictors/sdm_predictor_set_climate_10m.csv&quot;) %&gt;%
+clim.in &lt;- read.csv(paste0(&quot;processed_data/iland_clim_soils/future_predictors/sdm_predictor_set_climate_&quot;,rcp.flag,&quot;_10m.csv&quot;)) %&gt;%
   dplyr::select(c(id_model,gcm,decade,mean_temp,summer_prec,rad)) %&gt;%
   pivot_longer(c(mean_temp:rad)) %&gt;%
   left_join(scale.in, by=&quot;name&quot;) %&gt;%
@@ -425,16 +432,16 @@ clim.in &lt;- read.csv(&quot;processed_data/iland_clim_soils/future_predictors/s
 
 # only get plot-level aggregated values for species present in 5 or more plots
 # subset to only species in 5 or more plots
-pres.sub &lt;- read.csv(&quot;processed_data/understory_model/understory_subset_presence_cover.csv&quot;)
+pres.sub &lt;- read.csv(paste0(&quot;processed_data/understory_model/understory_&quot;,rich.flag,&quot;_presence_cover.csv&quot;))
 # names lookup
 pft.in &lt;- read.csv(&quot;processed_data/species_lookup/final_pft_categories_ms.csv&quot;) %&gt;%
-  rename(pft_new=pft) %&gt;%
+  mutate(pft_new=gsub(&quot;-&quot;,&quot;_&quot;,pft)) %&gt;%
   dplyr::select(c(species_name,species_name_ellenberg,PlantGrowthForm,pft_new))
 
 ellen.in &lt;- read.xlsx(&quot;processed_data/species_lookup/species_lookup_ellenberg.xlsx&quot;, sheet=&quot;species_lookup_ellenberg&quot;)
 
 # richness corrections
-load(&quot;processed_data/understory_model/final_fits/richness_prediction_corrections/richness_corrections.RData&quot;)
+load(paste0(&quot;processed_data/understory_model/final_fits/richness_prediction_corrections/richness_&quot;,rich.flag,&quot;_corrections.RData&quot;))
 
 # species lookup for richness corrections
 rich.lookup &lt;- data.frame(species_name = unique(pres.sub$species_name)) %&gt;%
@@ -509,7 +516,7 @@ SESAM.prr &lt;- function (proba, sr) {
 # 3. predict future community-level responses
 ###
 
-pred.listin &lt;- read.csv(&quot;processed_data/iland_sdm_predictions/prediction_scenarios.csv&quot;) %&gt;%
+pred.listin &lt;- read.csv(paste0(&quot;processed_data/iland_sdm_predictions/prediction_scenarios_&quot;,rcp.flag,&quot;.csv&quot;)) %&gt;%
   mutate(forest_climate = paste(pred_forest,pred_climate,sep=&quot;_&quot;))
 
 # expand list based on number of reps
@@ -564,21 +571,24 @@ for(i in 1:dim(pred.list)[1]) {
     mutate(across(c(prop_fasy), ~replace_na(.,0))) %&gt;%
     dplyr::select(-cell_id)
   
-  ### first predict cover
-  load(&quot;processed_data/understory_model/final_fits/mem_prediction_cover/cover_final.RData&quot;)
-  
-  cover.pred &lt;- iland.pred
-  
-  cover.pred$cover_pct &lt;- predict(final.mod, newdata=cover.pred)
-  
-  cover.out &lt;- cover.pred %&gt;%
-    dplyr::select(id_model,cover_pct)
-  
-  # clean up
-  rm(cover.pred)
-  
-  # write out
-  write.csv(cover.out, paste0(&quot;processed_data/iland_sdm_predictions/future_predictions_10m/&quot;,pred.list[i,]$pred_forest,&quot;Forest_&quot;,pred.list[i,]$pred_climate,&quot;Climate_&quot;,pred.list[i,]$pred_gcm,&quot;_&quot;,pred.list[i,]$pred_wind,&quot;_&quot;,pred.list[i,]$rep,&quot;_&quot;,pred.list[i,]$pred_decade,&quot;_total_cover.csv&quot;),row.names=FALSE)
+  ### first predict cover, only need to do this once per RCP
+  if(rich.flag==&quot;subset&quot;) {
+    load(&quot;processed_data/understory_model/final_fits/mem_prediction_cover/cover_final.RData&quot;)
+    
+    cover.pred &lt;- iland.pred
+    
+    cover.pred$cover_pct &lt;- predict(final.mod, newdata=cover.pred)
+    
+    cover.out &lt;- cover.pred %&gt;%
+      dplyr::select(id_model,cover_pct)
+    
+    # clean up
+    rm(cover.pred)
+    
+    # write out
+    write.csv(cover.out, paste0(&quot;processed_data/iland_sdm_predictions/future_predictions_10m/&quot;,pred.list[i,]$pred_forest,&quot;Forest_&quot;,pred.list[i,]$pred_climate,&quot;Climate_&quot;,pred.list[i,]$pred_gcm,&quot;_&quot;,pred.list[i,]$pred_wind,&quot;_&quot;,pred.list[i,]$rep,&quot;_&quot;,pred.list[i,]$pred_decade,&quot;_total_cover.csv&quot;),row.names=FALSE)
+    
+  }
   
   ### next species responses
 
@@ -588,7 +598,7 @@ for(i in 1:dim(pred.list)[1]) {
   # iland.predsub &lt;- iland.pred %&gt;% filter(chunk==0)
 
   detectCores() # 8
-  cl = makeCluster(4) # use 3, trying 4
+  cl = makeCluster(3) # use 3, trying 4
   # more on server, 40
   # cl = makeCluster(10)
   registerDoParallel(cl)
@@ -614,13 +624,17 @@ for(i in 1:dim(pred.list)[1]) {
       
       print(k)
       
-      load(k)
-      
       sp_name &lt;- as.data.frame(k) %&gt;%
         separate(k, into=c(&quot;dir1&quot;,&quot;dir2&quot;,&quot;dir3&quot;,&quot;dir4&quot;,&quot;name&quot;), sep=&quot;/&quot;) %&gt;%
         separate(name, into=c(&quot;species_name&quot;,&quot;suf&quot;), sep=&quot;.RD&quot;)
       
+      # only predict for species in selected subset
+      if(!sp_name$species_name %in% c(pres.sub$species_name)) {
+        next
+      }
+      
       # make individual sdm prediction
+      load(k)
       sdm.pred &lt;- iland.predsub %&gt;%
         mutate(species_name = sp_name$species_name)
       sdm.pred$rf_pred &lt;- predict(rf.mod, newdata=sdm.pred)
@@ -696,7 +710,10 @@ for(i in 1:dim(pred.list)[1]) {
     # Cleland, Elsa E., Scott L. Collins, Timothy L. Dickson, Emily C. Farrer, Katherine L. Gross, Laureano A. Gherardi, Lauren M. Hallett et al. &quot;Sensitivity of grassland plant community composition to spatial vs. temporal variation in precipitation.&quot; Ecology 94, no. 8 (2013): 1687-1696.
     # [(new species) + (lost species)]/(total species including both time periods)
     # read in historical species predictions for same chunk
-    turn.prep &lt;- read.csv(paste0(&quot;processed_data/iland_sdm_predictions/historical_predictions_10m/sdm_predictions_species_10m_chunk_&quot;,h,&quot;.csv&quot;)) %&gt;%
+    # load full subset, then filter
+    turn.prep &lt;- read.csv(paste0(&quot;processed_data/iland_sdm_predictions/historical_predictions_10m/subset/sdm_predictions_species_10m_chunk_&quot;,h,&quot;.csv&quot;)) %&gt;%
+      # subset to species list
+      filter(species_name %in% c(pres.sub$species_name)) %&gt;%
       rename(hx_pred = rf_pred) %&gt;%
       left_join(sdm.corr, by=c(&quot;id_model&quot;,&quot;species_name&quot;)) %&gt;%
       # label retained, new, lost; rest are NA
@@ -732,10 +749,10 @@ for(i in 1:dim(pred.list)[1]) {
     
     ### write out
     # species sums
-    write.csv(species.out, paste0(&quot;processed_data/iland_sdm_predictions/future_predictions_10m/&quot;,pred.list[i,]$pred_forest,&quot;Forest_&quot;,pred.list[i,]$pred_climate,&quot;Climate_&quot;,pred.list[i,]$pred_gcm,&quot;_&quot;,pred.list[i,]$pred_wind,&quot;_&quot;,pred.list[i,]$rep,&quot;_&quot;,pred.list[i,]$pred_decade,&quot;_speciesSums_chunk_&quot;,h,&quot;.csv&quot;),row.names=FALSE)
+    write.csv(species.out, paste0(&quot;processed_data/iland_sdm_predictions/future_predictions_10m/&quot;,rich.flag,&quot;/&quot;,pred.list[i,]$pred_forest,&quot;Forest_&quot;,pred.list[i,]$pred_climate,&quot;Climate_&quot;,pred.list[i,]$pred_gcm,&quot;_&quot;,pred.list[i,]$pred_wind,&quot;_&quot;,pred.list[i,]$rep,&quot;_&quot;,pred.list[i,]$pred_decade,&quot;_speciesSums_chunk_&quot;,h,&quot;.csv&quot;),row.names=FALSE)
     
     # plots
-    write.csv(plots.out, paste0(&quot;processed_data/iland_sdm_predictions/future_predictions_10m/&quot;,pred.list[i,]$pred_forest,&quot;Forest_&quot;,pred.list[i,]$pred_climate,&quot;Climate_&quot;,pred.list[i,]$pred_gcm,&quot;_&quot;,pred.list[i,]$pred_wind,&quot;_&quot;,pred.list[i,]$rep,&quot;_&quot;,pred.list[i,]$pred_decade,&quot;_plot_chunk_&quot;,h,&quot;.csv&quot;),row.names=FALSE)
+    write.csv(plots.out, paste0(&quot;processed_data/iland_sdm_predictions/future_predictions_10m/&quot;,rich.flag,&quot;/&quot;,pred.list[i,]$pred_forest,&quot;Forest_&quot;,pred.list[i,]$pred_climate,&quot;Climate_&quot;,pred.list[i,]$pred_gcm,&quot;_&quot;,pred.list[i,]$pred_wind,&quot;_&quot;,pred.list[i,]$rep,&quot;_&quot;,pred.list[i,]$pred_decade,&quot;_plot_chunk_&quot;,h,&quot;.csv&quot;),row.names=FALSE)
                                 
     # end.time = Sys.time()
     
@@ -750,11 +767,33 @@ for(i in 1:dim(pred.list)[1]) {
 
 }
 
+
 ###
 # 4. average change by replicate and scenario, response maps
 ###
 
-# continues to use pred.list from above
+### create new prediction list with full set of scenarios (2 RCPs for cover, x 2 subsets for richness and T)
+pred.listin &lt;- read.csv(paste0(&quot;processed_data/iland_sdm_predictions/prediction_scenarios_rcp45.csv&quot;)) %&gt;%
+  rbind(read.csv(paste0(&quot;processed_data/iland_sdm_predictions/prediction_scenarios_rcp85.csv&quot;))) %&gt;%
+  mutate(forest_climate = paste(pred_forest,pred_climate,sep=&quot;_&quot;))
+
+# expand list based on number of reps
+pred.listfull &lt;- data.frame()
+for(i in 1:dim(pred.listin)[1]) {
+  # print(i)
+  
+  for(j in 1:pred.listin[i,]$pred_reps) {
+    print(pred.listin[i,])
+    list.out &lt;- data.frame(cbind(pred.listin[i,],rep=j))
+    
+    pred.listfull &lt;- rbind(pred.listfull,list.out)
+  }
+  
+}
+
+# here only output full predictions for future_future runs
+pred.list &lt;- pred.listfull %&gt;%
+  filter(forest_climate==&quot;future_future&quot;)
 
 ### overall means
 # cover by scenario
@@ -779,9 +818,13 @@ chunk.list &lt;- read.csv(paste0(&quot;processed_data/iland_sdm_predictions/sdm_
   dplyr::select(c(id,cell_id)) %&gt;%
   mutate(chunk = round(id,-2))
 
+# expand pred.list to include flag for subset or auc07
+pred.richlist &lt;- cbind(pred.list, data.frame(rich_flag=&quot;subset&quot;)) %&gt;%
+  rbind(cbind(pred.list, data.frame(rich_flag=&quot;auc07&quot;)))
+
 resp.meanout &lt;- data.frame()
 # loop through reps and chunks
-for(i in 1:dim(pred.list)[1]) {
+for(i in 1:dim(pred.richlist)[1]) {
   print(i)
   
   resp.out &lt;- data.frame()
@@ -789,7 +832,7 @@ for(i in 1:dim(pred.list)[1]) {
     # print(j)
     
     # read in chunk
-    resp.in &lt;- read.csv(paste0(&quot;processed_data/iland_sdm_predictions/future_predictions_10m/&quot;,pred.list[i,]$pred_forest,&quot;Forest_&quot;,pred.list[i,]$pred_climate,&quot;Climate_&quot;,pred.list[i,]$pred_gcm,&quot;_&quot;,pred.list[i,]$pred_wind,&quot;_&quot;,pred.list[i,]$rep,&quot;_&quot;,pred.list[i,]$pred_decade,&quot;_plot_chunk_&quot;,j,&quot;.csv&quot;)) %&gt;%
+    resp.in &lt;- read.csv(paste0(&quot;processed_data/iland_sdm_predictions/future_predictions_10m/&quot;,pred.richlist[i,]$rich_flag,&quot;/&quot;,pred.richlist[i,]$pred_forest,&quot;Forest_&quot;,pred.richlist[i,]$pred_climate,&quot;Climate_&quot;,pred.richlist[i,]$pred_gcm,&quot;_&quot;,pred.richlist[i,]$pred_wind,&quot;_&quot;,pred.richlist[i,]$rep,&quot;_&quot;,pred.richlist[i,]$pred_decade,&quot;_plot_chunk_&quot;,j,&quot;.csv&quot;)) %&gt;%
       dplyr::select(c(id_model,corr_richness,corr_T))
     
     # combine into 1 df
@@ -798,7 +841,7 @@ for(i in 1:dim(pred.list)[1]) {
   }
   
   # mean and cv richness and T by rep
-  resp.mean &lt;- cbind(pred.list[i,],data.frame(mean_richness = mean(resp.out$corr_richness),
+  resp.mean &lt;- cbind(pred.richlist[i,],data.frame(mean_richness = mean(resp.out$corr_richness),
                                               cv_richness = (sd(resp.out$corr_richness)/mean(resp.out$corr_richness))*100,
                                               mean_T = mean(resp.out$corr_T),
                                               cv_T = (sd(resp.out$corr_T)/mean(resp.out$corr_T))*100))
@@ -810,11 +853,16 @@ for(i in 1:dim(pred.list)[1]) {
   gc()
 }
 
-# combine with cover and write out
-cover.meanout %&gt;%
-  left_join(resp.meanout, by=c(&quot;pred_decade&quot;,&quot;pred_forest&quot;,&quot;pred_climate&quot;,&quot;pred_gcm&quot;,&quot;pred_wind&quot;,&quot;pred_reps&quot;,&quot;forest_climate&quot;,&quot;rep&quot;)) %&gt;%
-  write.csv(&quot;processed_data/iland_sdm_predictions/future_prediction_summaries/scenario_mean_cv.csv&quot;,row.names=FALSE)
+# combine full species subset with cover and write out
+resp.meanout %&gt;%
+  filter(rich_flag==&quot;subset&quot;) %&gt;%
+  left_join(cover.meanout, by=c(&quot;pred_decade&quot;,&quot;pred_forest&quot;,&quot;pred_climate&quot;,&quot;pred_gcm&quot;,&quot;pred_wind&quot;,&quot;pred_reps&quot;,&quot;forest_climate&quot;,&quot;rep&quot;)) %&gt;%
+  write.csv(&quot;processed_data/iland_sdm_predictions/future_prediction_summaries/scenario_mean_cv_subset.csv&quot;,row.names=FALSE)
 
+# also write out predictions for species with AUC&gt;0.7, richness and T only
+resp.meanout %&gt;%
+  filter(rich_flag==&quot;auc07&quot;) %&gt;%
+  write.csv(&quot;processed_data/iland_sdm_predictions/future_prediction_summaries/scenario_mean_cv_auc07.csv&quot;,row.names=FALSE)
 
 ### spatial change in cover, richness, T by scenario
 # cover by scenario
@@ -874,77 +922,107 @@ for(j in unique(chunk.list$chunk)) {
 write.csv(cover.spout, &quot;processed_data/iland_sdm_predictions/future_prediction_summaries/spatial_cover_change.csv&quot;,row.names=FALSE)
 write.csv(cover.subout, &quot;processed_data/iland_sdm_predictions/future_prediction_summaries/spatial_cover_change_scenarios.csv&quot;,row.names=FALSE) 
 
+# richness and T by scenario, separate by RCP and species subset
+flags &lt;- data.frame(rcp_flag = rep(c(&quot;rcp45&quot;,&quot;rcp85&quot;),2), rich_flag = c(rep(&quot;subset&quot;,2),rep(&quot;auc07&quot;,2)))
 
-# richness and T by scenario
-resp.spout &lt;- data.frame()
-resp.subout &lt;- data.frame()
-
-# iterate through chunks
-for(j in unique(chunk.list$chunk)) {
-  print(j)
-  # print(Sys.time())
+for(k in 1:dim(flags)[1]) {
+  print(k)
   
-  chunk.sub &lt;- chunk.list %&gt;%
-    filter(chunk==j)
+  flags.sub &lt;- flags[k,]
   
-  resp.out &lt;- data.frame()
-  # iterate through scenarios
-  for(i in 1:dim(pred.list)[1]) {
-    # print(i)
+  richlist.sub &lt;- pred.richlist %&gt;%
+    filter(grepl(flags.sub$rcp_flag,pred_gcm), rich_flag==flags.sub$rich_flag)
+  
+  resp.spout &lt;- data.frame()
+  resp.subout &lt;- data.frame()
+  
+  
+  # iterate through chunks
+  for(j in unique(chunk.list$chunk)) {
+    print(j)
+    # print(Sys.time())
     
-    # read in all reps of responses for given chunk
-    resp.in &lt;- read.csv(paste0(&quot;processed_data/iland_sdm_predictions/future_predictions_10m/&quot;,pred.list[i,]$pred_forest,&quot;Forest_&quot;,pred.list[i,]$pred_climate,&quot;Climate_&quot;,pred.list[i,]$pred_gcm,&quot;_&quot;,pred.list[i,]$pred_wind,&quot;_&quot;,pred.list[i,]$rep,&quot;_&quot;,pred.list[i,]$pred_decade,&quot;_plot_chunk_&quot;,j,&quot;.csv&quot;)) %&gt;%
-      # replace nas for new, lost, retained with 0
-      mutate(across(c(new,lost,retained),~replace_na(.,0))) %&gt;%
-      mutate(turnover=(new+lost)/(new+lost+retained)) %&gt;%
-      cbind(pred.list[i,],row.names=NULL)
+    chunk.sub &lt;- chunk.list %&gt;%
+      filter(chunk==j)
     
-    resp.out &lt;- rbind(resp.out,resp.in)
+    resp.out &lt;- data.frame()
+    # iterate through scenarios
+    for(i in 1:dim(richlist.sub)[1]) {
+      # print(i)
+      
+      # read in all reps of responses for given chunk
+      resp.in &lt;- read.csv(paste0(&quot;processed_data/iland_sdm_predictions/future_predictions_10m/&quot;,richlist.sub[i,]$rich_flag,&quot;/&quot;,richlist.sub[i,]$pred_forest,&quot;Forest_&quot;,richlist.sub[i,]$pred_climate,&quot;Climate_&quot;,richlist.sub[i,]$pred_gcm,&quot;_&quot;,richlist.sub[i,]$pred_wind,&quot;_&quot;,richlist.sub[i,]$rep,&quot;_&quot;,richlist.sub[i,]$pred_decade,&quot;_plot_chunk_&quot;,j,&quot;.csv&quot;)) %&gt;%
+        # replace nas for new, lost, retained with 0
+        mutate(across(c(new,lost,retained),~replace_na(.,0))) %&gt;%
+        mutate(turnover=(new+lost)/(new+lost+retained)) %&gt;%
+        cbind(richlist.sub[i,],row.names=NULL)
+      
+      resp.out &lt;- rbind(resp.out,resp.in)
+    }
+    
+    # average change and variability across all scenarios
+    resp.sp &lt;- resp.out %&gt;%
+      pivot_longer(c(light_cold:retained)) %&gt;%
+      group_by(forest_climate,pred_decade,id_model,name,rich_flag) %&gt;%
+      summarise(mean_richness = mean(corr_richness),
+                cv_richness = (sd(corr_richness)/mean_richness) * 100,
+                mean_T = mean(corr_T),
+                cv_T = (sd(corr_T)/mean_T)*100,
+                mean_turnover=mean(turnover),
+                cv_turnover=(sd(corr_T)/mean_T)*100,
+                mean_value = mean(value)) %&gt;%
+      pivot_wider(names_from=&quot;name&quot;,values_from=&quot;mean_value&quot;) %&gt;%
+      dplyr::select(c(forest_climate:cv_turnover,light_cold,light_notemp,light_warm,shade_cold,shade_notemp,shade_warm,fern,graminoid,herb,shrub,lost,new,retained))
+    
+    # combine chunks
+    resp.spout &lt;- rbind(resp.spout,resp.sp)
+    
+    # change and variability by scenario, only for full subset
+    if(flags.sub$rich_flag==&quot;subset&quot;) {
+      resp.sub &lt;- resp.out %&gt;%
+        pivot_longer(c(light_cold:retained)) %&gt;%
+        group_by(forest_climate,pred_decade,pred_gcm,pred_wind,id_model,name,rich_flag) %&gt;%
+        summarise(mean_richness = mean(corr_richness),
+                  cv_richness = (sd(corr_richness)/mean_richness) * 100,
+                  mean_T = mean(corr_T),
+                  cv_T = (sd(corr_T)/mean_T)*100,
+                  mean_turnover=mean(turnover),
+                  cv_turnover=(sd(corr_T)/mean_T)*100,
+                  mean_value = mean(value)) %&gt;%
+        pivot_wider(names_from=&quot;name&quot;,values_from=&quot;mean_value&quot;) %&gt;%
+        dplyr::select(c(forest_climate:cv_turnover,light_cold,light_notemp,light_warm,shade_cold,shade_notemp,shade_warm,fern,graminoid,herb,shrub,lost,new,retained))
+      
+      # combine chunks
+      resp.subout &lt;- rbind(resp.subout,resp.sub)
+      
+      # clean up
+      rm(resp.sub)
+    }
+    
+    # clean up
+    rm(resp.out)
+    rm(resp.sp)
+    gc()
+    
   }
   
-  # average change and variability across all scenarios
-  resp.sp &lt;- resp.out %&gt;%
-    pivot_longer(c(light_cold:retained)) %&gt;%
-    group_by(forest_climate,pred_decade,id_model,name) %&gt;%
-    summarise(mean_richness = mean(corr_richness),
-              cv_richness = (sd(corr_richness)/mean_richness) * 100,
-              mean_T = mean(corr_T),
-              cv_T = (sd(corr_T)/mean_T)*100,
-              mean_turnover=mean(turnover),
-              cv_turnover=(sd(corr_T)/mean_T)*100,
-              mean_value = mean(value)) %&gt;%
-    pivot_wider(names_from=&quot;name&quot;,values_from=&quot;mean_value&quot;) %&gt;%
-    dplyr::select(c(forest_climate:cv_turnover,light_cold,light_indiff,light_warm,shade_cold,shade_indiff,shade_warm,fern,graminoid,herb,shrub,lost,new,retained))
-  
-  # change and variability by scenario
-  resp.sub &lt;- resp.out %&gt;%
-    pivot_longer(c(light_cold:retained)) %&gt;%
-    group_by(forest_climate,pred_decade,pred_gcm,pred_wind,id_model,name) %&gt;%
-    summarise(mean_richness = mean(corr_richness),
-              cv_richness = (sd(corr_richness)/mean_richness) * 100,
-              mean_T = mean(corr_T),
-              cv_T = (sd(corr_T)/mean_T)*100,
-              mean_turnover=mean(turnover),
-              cv_turnover=(sd(corr_T)/mean_T)*100,
-              mean_value = mean(value)) %&gt;%
-    pivot_wider(names_from=&quot;name&quot;,values_from=&quot;mean_value&quot;) %&gt;%
-    dplyr::select(c(forest_climate:cv_turnover,light_cold,light_indiff,light_warm,shade_cold,shade_indiff,shade_warm,fern,graminoid,herb,shrub,lost,new,retained))
-  
-  # combine chunks
-  resp.spout &lt;- rbind(resp.spout,resp.sp)
-  resp.subout &lt;- rbind(resp.subout,resp.sub)
+  # write out
+  write.csv(resp.spout, paste0(&quot;processed_data/iland_sdm_predictions/future_prediction_summaries/spatial_response_change_&quot;,flags.sub$rcp_flag,&quot;_&quot;,richlist.sub[i,]$rich_flag,&quot;.csv&quot;),row.names=FALSE)
   
   # clean up
-  rm(resp.out)
-  rm(resp.sp)
-  rm(resp.sub)
+  rm(resp.spout)
+  
+  if(flags.sub$rich_flag==&quot;subset&quot;) {
+    # write out all scenarios
+    write.csv(resp.subout, paste0(&quot;processed_data/iland_sdm_predictions/future_prediction_summaries/spatial_response_change_scenarios_&quot;,flags.sub$rcp_flag,&quot;_&quot;,richlist.sub[i,]$rich_flag,&quot;.csv&quot;),row.names=FALSE)
+  
+    # clean up
+    rm(resp.subout)
+    
+  }
   gc()
   
 }
-
-# write out
-write.csv(resp.spout, &quot;processed_data/iland_sdm_predictions/future_prediction_summaries/spatial_response_change.csv&quot;,row.names=FALSE)
-write.csv(resp.subout, &quot;processed_data/iland_sdm_predictions/future_prediction_summaries/spatial_response_change_scenarios.csv&quot;,row.names=FALSE)
 
 ### maps
 
@@ -963,9 +1041,17 @@ cover.hx &lt;- read.csv(&quot;processed_data/iland_sdm_predictions/historical_pr
   mutate(decade=&quot;2020&quot;,scen=&quot;all&quot;) %&gt;%
   pivot_longer(cover)
 
-hx.in &lt;- list.files(&quot;processed_data/iland_sdm_predictions/historical_predictions_10m/&quot;, pattern=&quot;_plot_&quot;, full.names = TRUE) %&gt;%
+hx.insub &lt;- list.files(&quot;processed_data/iland_sdm_predictions/historical_predictions_10m/subset/&quot;, pattern=&quot;_plot_&quot;, full.names = TRUE) %&gt;%
   map_df(~read_csv(.)) %&gt;%
-  mutate(decade=&quot;2020&quot;,scen=&quot;all&quot;) %&gt;%
+  mutate(decade=&quot;2020&quot;,scen=&quot;subset&quot;) %&gt;%
+  dplyr::select(c(id_model,corr_richness,corr_T,decade,scen)) %&gt;%
+  rename(richness=corr_richness,
+         eivTemp=corr_T) %&gt;%
+  pivot_longer(c(richness,eivTemp))
+
+hx.inauc &lt;- list.files(&quot;processed_data/iland_sdm_predictions/historical_predictions_10m/auc07/&quot;, pattern=&quot;_plot_&quot;, full.names = TRUE) %&gt;%
+  map_df(~read_csv(.)) %&gt;%
+  mutate(decade=&quot;2020&quot;,scen=&quot;auc07&quot;) %&gt;%
   dplyr::select(c(id_model,corr_richness,corr_T,decade,scen)) %&gt;%
   rename(richness=corr_richness,
          eivTemp=corr_T) %&gt;%
@@ -979,64 +1065,132 @@ cover.spin &lt;- read.csv(&quot;processed_data/iland_sdm_predictions/future_pred
   mutate(scen=&quot;all&quot;) %&gt;%
   pivot_longer(cover)
 
-resp.spin &lt;- read.csv(&quot;processed_data/iland_sdm_predictions/future_prediction_summaries/spatial_response_change.csv&quot;) %&gt;%
+resp.spin45subset &lt;- read.csv(&quot;processed_data/iland_sdm_predictions/future_prediction_summaries/spatial_response_change_rcp45_subset.csv&quot;) %&gt;%
   rename(richness=mean_richness,
          eivTemp=mean_T,
          decade=pred_decade,
          turnover=mean_turnover) %&gt;%
   dplyr::select(c(id_model,decade,richness,eivTemp,turnover,lost)) %&gt;%
-  mutate(scen=&quot;all&quot;) %&gt;%
+  mutate(scen=&quot;rcp45_subset&quot;) %&gt;%
   pivot_longer(c(richness,eivTemp,turnover,lost))
+
+resp.spin85subset &lt;- read.csv(&quot;processed_data/iland_sdm_predictions/future_prediction_summaries/spatial_response_change_rcp85_subset.csv&quot;) %&gt;%
+  rename(richness=mean_richness,
+         eivTemp=mean_T,
+         decade=pred_decade,
+         turnover=mean_turnover) %&gt;%
+  dplyr::select(c(id_model,decade,richness,eivTemp,turnover,lost)) %&gt;%
+  mutate(scen=&quot;rcp85_subset&quot;) %&gt;%
+  pivot_longer(c(richness,eivTemp,turnover,lost))
+
+resp.spin45auc &lt;- read.csv(&quot;processed_data/iland_sdm_predictions/future_prediction_summaries/spatial_response_change_rcp45_auc07.csv&quot;) %&gt;%
+  rename(richness=mean_richness,
+         eivTemp=mean_T,
+         decade=pred_decade,
+         turnover=mean_turnover) %&gt;%
+  dplyr::select(c(id_model,decade,richness,eivTemp,turnover,lost)) %&gt;%
+  mutate(scen=&quot;rcp45_auc07&quot;) %&gt;%
+  pivot_longer(c(richness,eivTemp,turnover,lost))
+
+resp.spin85auc &lt;- read.csv(&quot;processed_data/iland_sdm_predictions/future_prediction_summaries/spatial_response_change_rcp85_auc07.csv&quot;) %&gt;%
+  rename(richness=mean_richness,
+         eivTemp=mean_T,
+         decade=pred_decade,
+         turnover=mean_turnover) %&gt;%
+  dplyr::select(c(id_model,decade,richness,eivTemp,turnover,lost)) %&gt;%
+  mutate(scen=&quot;rcp85_auc07&quot;) %&gt;%
+  pivot_longer(c(richness,eivTemp,turnover,lost))
+
+# also combine rcps for 2050 and 2100
+resp.spinsubset &lt;- rbind(resp.spin45subset,resp.spin85subset) %&gt;%
+  group_by(id_model,decade,name) %&gt;%
+  summarise(value=mean(value)) %&gt;%
+  mutate(scen=&quot;subset&quot;)
+
+resp.spinauc &lt;- rbind(resp.spin45auc,resp.spin85auc) %&gt;%
+  group_by(id_model,decade,name) %&gt;%
+  summarise(value=mean(value)) %&gt;%
+  mutate(scen=&quot;auc07&quot;)
 
 # cover for disturbance scenarios
 cover.subin &lt;- read.csv(&quot;processed_data/iland_sdm_predictions/future_prediction_summaries/spatial_cover_change_scenarios.csv&quot;) %&gt;%
   rename(cover=cover_mean,
          decade=pred_decade) %&gt;%
-  mutate(scen=paste0(&quot;wind_&quot;,pred_wind)) %&gt;%
+  mutate(rcp = ifelse(grepl(&quot;rcp45&quot;,pred_gcm),&quot;rcp45&quot;,
+                      ifelse(grepl(&quot;rcp85&quot;,pred_gcm),&quot;rcp85&quot;,NA))) %&gt;%
+  mutate(scen=paste0(rcp,&quot;_wind&quot;,pred_wind)) %&gt;%
+  group_by(id_model,decade,scen) %&gt;%
+  summarise(cover=mean(cover)) %&gt;%
   dplyr::select(c(id_model,decade,cover,scen)) %&gt;%
   pivot_longer(cover)
+
+cover.subwind &lt;- cover.subin %&gt;%
+  mutate(scen=ifelse(grepl(&quot;wind0&quot;,scen),&quot;wind0&quot;,
+                     ifelse(grepl(&quot;wind15&quot;,scen),&quot;wind15&quot;,NA))) %&gt;%
+  group_by(id_model,decade,scen,name) %&gt;%
+  summarise(value=mean(value))
   
 # combine responses
 resp.all &lt;- cover.hx %&gt;%
-  rbind(hx.in) %&gt;%
   rbind(cover.spin) %&gt;%
-  rbind(resp.spin) %&gt;%
+  rbind(cover.subwind) %&gt;%
   rbind(cover.subin) %&gt;%
+  rbind(hx.insub) %&gt;%
+  rbind(resp.spinsubset) %&gt;%
+  rbind(resp.spin45subset) %&gt;%
+  rbind(resp.spin85subset) %&gt;%
+  rbind(hx.inauc) %&gt;%
+  rbind(resp.spinauc)%&gt;%
+  rbind(resp.spin45auc) %&gt;%
+  rbind(resp.spin85auc) %&gt;%
   mutate(response = paste(name,scen,decade,sep=&quot;_&quot;))
 
 # create raster with all responses for spatial analysis and plotting
-rast.out &lt;- rid.in
+# separate rasters for each response
+for(j in c(&quot;cover&quot;,&quot;richness&quot;,&quot;eivTemp&quot;,&quot;turnover&quot;)) {
+  print(j)
+  
+  rast.sub &lt;- resp.all %&gt;%
+    filter(grepl(j,response))
+  
+  rast.out &lt;- rid.in
+  
+  for(i in unique(rast.sub$response)) {
+    print(i)
+    name.in &lt;- i 
+    
+    rast.prep &lt;- rast.sub %&gt;%
+      filter(response==name.in) %&gt;%
+      dplyr::select(id_model,value)
+    
+    rid.na &lt;- rid.sub %&gt;%
+      filter(!(id_model %in% c(rast.prep$id_model))) %&gt;%
+      mutate(value=NA) %&gt;%
+      rbind(rast.prep)
+    
+    rast.class &lt;- classify(rid.in,rcl = cbind(rid.na$id_model,rid.na$value))
+    names(rast.class) &lt;- name.in
+    plot(rast.class, main=name.in)
+    
+    rast.out &lt;- c(rast.out,rast.class)
+  }
 
-for(i in unique(resp.all$response)) {
-  print(i)
-  name.in &lt;- i 
-  
-  rast.prep &lt;- resp.all %&gt;%
-    filter(response==name.in) %&gt;%
-    dplyr::select(id_model,value)
-  
-  rid.na &lt;- rid.sub %&gt;%
-    filter(!(id_model %in% c(rast.prep$id_model))) %&gt;%
-    mutate(value=NA) %&gt;%
-    rbind(rast.prep)
-  
-  rast.class &lt;- classify(rid.in,rcl = cbind(rid.na$id_model,rid.na$value))
-  names(rast.class) &lt;- name.in
-  plot(rast.class, main=name.in)
-  
-  rast.out &lt;- c(rast.out,rast.class)
+  writeRaster(rast.out[[-1]], filename=paste0(&quot;processed_data/iland_sdm_predictions/&quot;,j,&quot;_response_rasters.tif&quot;),overwrite=TRUE)
+
 }
-
-writeRaster(rast.out[[-1]], filename=paste0(&quot;processed_data/iland_sdm_predictions/response_rasters.tif&quot;),overwrite=TRUE)
 
 ###
 # 5. landscape-scale species loss
 ###
 
 # double check that all species present in historical scenario
+# check for subset and auc07
+rich.flag &lt;- &quot;subset&quot;
+# rich.flag &lt;- &quot;auc07&quot;
+
 spsums.hx &lt;- setNames(
-  list.files(&quot;processed_data/iland_sdm_predictions/historical_predictions_10m/&quot;, pattern=&quot;speciesSums&quot;, full.names=TRUE), 
-  list.files(&quot;processed_data/iland_sdm_predictions/historical_predictions_10m/&quot;, pattern=&quot;speciesSums&quot;)) %&gt;%
+  list.files(paste0(&quot;processed_data/iland_sdm_predictions/historical_predictions_10m/&quot;,rich.flag,&quot;/&quot;), pattern=&quot;speciesSums&quot;, full.names=TRUE), 
+  list.files(paste0(&quot;processed_data/iland_sdm_predictions/historical_predictions_10m/&quot;,rich.flag,&quot;/&quot;), pattern=&quot;speciesSums&quot;)) %&gt;%
   map_dfr(read.csv, .id = NULL) %&gt;%
   group_by(species_name) %&gt;%
   summarise_all(sum) %&gt;%
@@ -1044,14 +1198,25 @@ spsums.hx &lt;- setNames(
   rename(pres_plots=rf_pred,total_plots=n_plots) %&gt;%
   # add columns
   mutate(pred_decade=&quot;2020&quot;,
-         pred_gcm=NA,pred_wind=NA,pred_rep=NA,lost=NA)
-summary(spsums.hx)
+         pred_gcm=NA,pred_wind=NA,pred_rep=NA,lost=NA, rich_flag=rich.flag)
+summary(spsums.hx) # yes
 
 # read in species sums for each chunk and scenario
-spsums.in &lt;- setNames(
-  list.files(&quot;processed_data/iland_sdm_predictions/future_predictions_10m/&quot;, pattern=&quot;speciesSums&quot;, full.names=TRUE), 
-  list.files(&quot;processed_data/iland_sdm_predictions/future_predictions_10m/&quot;, pattern=&quot;speciesSums&quot;)) %&gt;%
-  map_dfr(read.csv, .id = &quot;run_id&quot;)
+spsums.insub &lt;- setNames(
+  list.files(&quot;processed_data/iland_sdm_predictions/future_predictions_10m/subset/&quot;, pattern=&quot;speciesSums&quot;, full.names=TRUE), 
+  list.files(&quot;processed_data/iland_sdm_predictions/future_predictions_10m/subset/&quot;, pattern=&quot;speciesSums&quot;)) %&gt;%
+  map_dfr(read.csv, .id = &quot;run_id&quot;) %&gt;%
+  mutate(rich_flag=&quot;subset&quot;)
+
+spsums.inauc &lt;- setNames(
+  list.files(&quot;processed_data/iland_sdm_predictions/future_predictions_10m/auc07/&quot;, pattern=&quot;speciesSums&quot;, full.names=TRUE), 
+  list.files(&quot;processed_data/iland_sdm_predictions/future_predictions_10m/auc07/&quot;, pattern=&quot;speciesSums&quot;)) %&gt;%
+  map_dfr(read.csv, .id = &quot;run_id&quot;) %&gt;%
+  mutate(rich_flag=&quot;auc07&quot;)
+
+spsums.in &lt;- rbind(spsums.insub,spsums.inauc)
+rm(spsums.insub)
+rm(spsums.inauc)
 
 # assign scenario name
 # run separately for efficiency
@@ -1066,7 +1231,7 @@ spsums.agg &lt;- spsums.in %&gt;%
   left_join(spsums.scens, by=c(&quot;run_id&quot;)) %&gt;%
   dplyr::select(-run_id) %&gt;%
   # sum species presence
-  group_by(pred_decade,pred_gcm,pred_wind,pred_rep,species_name) %&gt;%
+  group_by(pred_decade,pred_gcm,pred_wind,pred_rep,rich_flag,species_name) %&gt;%
   summarise(pres_plots = sum(rf_pred),
             total_plots = sum(n_plots)) %&gt;%
   # add counter for lost species
@@ -1118,7 +1283,8 @@ as.data.frame(values(c(rid.in,dem.10m))) %&gt;%
 
 ### predict these plots for all scenarios
 # read in pred list again
-pred.listin &lt;- read.csv(&quot;processed_data/iland_sdm_predictions/prediction_scenarios.csv&quot;) %&gt;%
+pred.listin &lt;- read.csv(&quot;processed_data/iland_sdm_predictions/prediction_scenarios_rcp45.csv&quot;) %&gt;%
+  rbind(read.csv(&quot;processed_data/iland_sdm_predictions/prediction_scenarios_rcp85.csv&quot;)) %&gt;%
   mutate(forest_climate = paste(pred_forest,pred_climate,sep=&quot;_&quot;))
 
 # expand list based on number of reps
@@ -1139,6 +1305,16 @@ for(i in 1:dim(pred.listin)[1]) {
 pred.list &lt;- pred.listfull 
   # filter(!forest_climate==&quot;future_future&quot;)
 
+# run separately for species subset (including cover) or auc&gt;0.7 species
+rich.flag &lt;- &quot;subset&quot;
+# rich.flag &lt;- &quot;auc07&quot;
+
+# upload data specific to richness flag
+# species list
+pres.sub &lt;- read.csv(paste0(&quot;processed_data/understory_model/understory_&quot;,rich.flag,&quot;_presence_cover.csv&quot;))
+# richness corrections
+load(paste0(&quot;processed_data/understory_model/final_fits/richness_prediction_corrections/richness_&quot;,rich.flag,&quot;_corrections.RData&quot;))
+
 # 2 time points for each: 2050, 2100
 # future climate (2 GCMs in 2050, 2100) x hx forest (1 set of predictors)
 # future forest under 2 disturbance scenarios (2 disturbance, in 2050, 2100) x hx climate (1 set of predictors)
@@ -1151,6 +1327,18 @@ clim.hx &lt;- read.csv(paste0(&quot;processed_data/iland_sdm_predictions/sdm_pre
 # read in 10m resolution forest predictors, also include site predictors
 for.hx &lt;- read.csv(paste0(&quot;processed_data/iland_sdm_predictions/sdm_predictor_set_10m.csv&quot;)) %&gt;%
   dplyr::select(c(id,cell_id,TSFdec,BA,prop_fasy,soil_fert,whc,sand))
+
+# full set of future climate predictors
+clim.in &lt;- read.csv(&quot;processed_data/iland_clim_soils/future_predictors/sdm_predictor_set_climate_rcp45_10m.csv&quot;) %&gt;%
+  rbind(read.csv(&quot;processed_data/iland_clim_soils/future_predictors/sdm_predictor_set_climate_rcp85_10m.csv&quot;)) %&gt;%
+  dplyr::select(c(id_model,gcm,decade,mean_temp,summer_prec,rad)) %&gt;%
+  pivot_longer(c(mean_temp:rad)) %&gt;%
+  left_join(scale.in, by=&quot;name&quot;) %&gt;%
+  # rescale using original mean and sd
+  mutate(value_calc = (value-mean)/sd) %&gt;%
+  # drop unscaled values
+  dplyr::select(-c(value:sd)) %&gt;%
+  pivot_wider(names_from=&quot;name&quot;,values_from=&quot;value_calc&quot;)
 
 pred.resolution &lt;- &quot;10m&quot;
 
@@ -1243,18 +1431,21 @@ for(i in 1:dim(pred.list)[1]) {
 
   }
   
-  ### first predict cover
-  load(&quot;processed_data/understory_model/final_fits/mem_prediction_cover/cover_final.RData&quot;)
-  
-  cover.pred &lt;- iland.pred
-  
-  cover.pred$cover_pct &lt;- predict(final.mod, newdata=cover.pred)
-  
-  cover.out &lt;- cover.pred %&gt;%
-    dplyr::select(id_model,cover_pct)
-  
-  # clean up
-  rm(cover.pred)
+  ### first predict cover, only need to do this once per RCP
+  if(rich.flag==&quot;subset&quot;) {
+    load(&quot;processed_data/understory_model/final_fits/mem_prediction_cover/cover_final.RData&quot;)
+    
+    cover.pred &lt;- iland.pred
+    
+    cover.pred$cover_pct &lt;- predict(final.mod, newdata=cover.pred)
+    
+    cover.out &lt;- cover.pred %&gt;%
+      dplyr::select(id_model,cover_pct)
+    
+    # clean up
+    rm(cover.pred)
+    
+  }
   
   ### next species responses
   
@@ -1265,13 +1456,17 @@ for(i in 1:dim(pred.list)[1]) {
     
     print(k)
     
-    load(k) 
-    
     sp_name &lt;- as.data.frame(k) %&gt;%
       separate(k, into=c(&quot;dir1&quot;,&quot;dir2&quot;,&quot;dir3&quot;,&quot;dir4&quot;,&quot;name&quot;), sep=&quot;/&quot;) %&gt;%
       separate(name, into=c(&quot;species_name&quot;,&quot;suf&quot;), sep=&quot;.RD&quot;)
     
+    # only predict for species in selected subset
+    if(!sp_name$species_name %in% c(pres.sub$species_name)) {
+      next
+    }
+    
     # make individual sdm prediction
+    load(k)
     sdm.pred &lt;- iland.pred %&gt;%
       mutate(species_name = sp_name$species_name)
     sdm.pred$rf_pred &lt;- predict(rf.mod, newdata=sdm.pred)
@@ -1324,14 +1519,21 @@ for(i in 1:dim(pred.list)[1]) {
   ellen.corr &lt;- ellen_compute(sdm.corr, unique(pres.sub$species_name)) %&gt;%
     pivot_wider(names_from=&quot;name&quot;,values_from=&quot;value&quot;,names_prefix = &quot;corr_&quot;)
   
-  plots.out &lt;- rich.id %&gt;%
-    # left_join(ellen.uncorr, by=&quot;id_model&quot;) %&gt;%
-    left_join(ellen.corr, by=&quot;id_model&quot;) %&gt;%
-    dplyr::select(-raw_richness) %&gt;%
-    left_join(cover.out, by=&quot;id_model&quot;) 
-    # left_join(iland.predout, by=&quot;id_model&quot;)
+  if(rich.flag==&quot;subset&quot;) {
+    plots.out &lt;- rich.id %&gt;%
+      # left_join(ellen.uncorr, by=&quot;id_model&quot;) %&gt;%
+      left_join(ellen.corr, by=&quot;id_model&quot;) %&gt;%
+      dplyr::select(-raw_richness) %&gt;%
+      left_join(cover.out, by=&quot;id_model&quot;) 
+      # left_join(iland.predout, by=&quot;id_model&quot;)
+  } else if(rich.flag==&quot;auc07&quot;) {
+    plots.out &lt;- rich.id %&gt;%
+      # left_join(ellen.uncorr, by=&quot;id_model&quot;) %&gt;%
+      left_join(ellen.corr, by=&quot;id_model&quot;) %&gt;%
+      dplyr::select(-raw_richness)
+  }
   
-  write.csv(plots.out, paste0(&quot;processed_data/iland_sdm_predictions/rand_sample_predictions/&quot;,pred.list[i,]$pred_forest,&quot;Forest_&quot;,pred.list[i,]$pred_climate,&quot;Climate_&quot;,pred.list[i,]$pred_gcm,&quot;_&quot;,pred.list[i,]$pred_wind,&quot;_&quot;,pred.list[i,]$rep,&quot;_&quot;,pred.list[i,]$pred_decade,&quot;_plot.csv&quot;),row.names=FALSE)
+  write.csv(plots.out, paste0(&quot;processed_data/iland_sdm_predictions/rand_sample_predictions/&quot;,rich.flag,&quot;/&quot;,pred.list[i,]$pred_forest,&quot;Forest_&quot;,pred.list[i,]$pred_climate,&quot;Climate_&quot;,pred.list[i,]$pred_gcm,&quot;_&quot;,pred.list[i,]$pred_wind,&quot;_&quot;,pred.list[i,]$rep,&quot;_&quot;,pred.list[i,]$pred_decade,&quot;_plot.csv&quot;),row.names=FALSE)
             
   # clean up
   rm(for.pred)

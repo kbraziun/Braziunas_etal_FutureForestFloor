@@ -167,7 +167,7 @@ for(j in sp.list) {
       
     }
 
-    save(rf.mod,rf.train,file=paste0("processed_data/understory_model/evaluation/sdm_evaluation_fits/",j,"_run",i,".RData"))
+    save(rf.mod,rf.train,file=paste0("processed_data/understory_model/evaluation/sdm_evaluation_fits_",eval,"/",j,"_run",i,".RData"))
     
     # test.plots <- rbind(test.plots,rf.test) # use this to check to see if all plots end up in training data at least once, n=10 not quite enough, trying n=20 reps which gets very close
     

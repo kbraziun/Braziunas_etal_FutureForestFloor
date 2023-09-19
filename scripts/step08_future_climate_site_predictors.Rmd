@@ -57,10 +57,14 @@ write.csv(site.in, "processed_data/iland_clim_soils/future_predictors/sdm_predic
 # 10 yrs prior to 2050, 2100 in each gcm
 list.files("iland/database/", pattern="rcp",full.names = TRUE)
 
+# read in either rcp 8.5 or 4.5
+# patt.in <- "rcp85"
+patt.in <- "rcp45"
+
 # annual
 clim.out <- data.frame()
 
-for(j in list.files("iland/database/", pattern="rcp",full.names = TRUE)) {
+for(j in list.files("iland/database/", pattern=patt.in,full.names = TRUE)) {
   print(j) 
   
   clim.name <- as.data.frame(j) %>%
@@ -102,7 +106,7 @@ clim.ann <- clim.out
 # monthly
 clim.out <- data.frame()
 
-for(j in list.files("iland/database/", pattern="rcp",full.names = TRUE)) {
+for(j in list.files("iland/database/", pattern=patt.in,full.names = TRUE)) {
   print(j)
   
   clim.name <- as.data.frame(j) %>%
@@ -194,5 +198,6 @@ clim.predout <- site.in %>%
   left_join(clim.pred, by=c("model.climate.tableName" = "table_name")) %>%
   dplyr::select(-model.climate.tableName)
 
-write.csv(clim.predout, "processed_data/iland_clim_soils/future_predictors/sdm_predictor_set_climate_10m.csv",row.names=FALSE)
+write.csv(clim.predout, paste0("processed_data/iland_clim_soils/future_predictors/sdm_predictor_set_climate_",patt.in,"_10m.csv"),row.names=FALSE)
+
 ```

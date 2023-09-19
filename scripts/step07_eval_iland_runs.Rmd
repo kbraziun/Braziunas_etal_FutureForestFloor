@@ -178,31 +178,36 @@ clim.in %>%
 # average temp change 2020 to 2100, similar between gcms
 clim.in %>%
   filter(year%in% c(2000:2009,2091:2100)) %>%
-  mutate(decade = floor(year/10)) %>%
-  group_by(decade) %>%
+  # add decade
+  mutate(decade = ifelse(year %in% c(2000:2009),2010,
+                         ifelse(year %in% c(2091:2100),2100,NA))) %>%
+  group_by(rcp,decade) %>%
   summarise(across(c(mean_temp),mean)) %>%
   pivot_wider(names_from=decade,values_from=mean_temp) %>%
-  mutate(change = `209`-`200`)
+  mutate(change = `2100`-`2010`)
 
 # average summer precip change 2020 to 2100, differs between gcms
 clim.in %>%
   filter(year%in% c(2000:2009,2091:2100)) %>%
-  mutate(decade = floor(year/10)) %>%
+  # add decade
+  mutate(decade = ifelse(year %in% c(2000:2009),2010,
+                         ifelse(year %in% c(2091:2100),2100,NA))) %>%
   group_by(decade,gcm) %>%
   summarise(across(c(summ_prec),mean))  %>%
   pivot_wider(names_from=decade,values_from=summ_prec) %>%
-  mutate(change = `209`-`200`)
+  mutate(change = `2100`-`2010`)
 
 ### beetles: assume should be slightly affected by wind speed (more infested/killed with more wind)
 beetle.in %>%
-  ggplot(aes(x=year,y=infestedArea_ha, group=rep, color=rep, fill=rep)) +
+  mutate(rcp_rep = paste(rcp,rep,sep="_")) %>%
+  ggplot(aes(x=year,y=infestedArea_ha, group=rcp_rep, color=rcp_rep)) +
   facet_grid(gcm~wind_speed) +
   geom_line() +
   theme_bw() # check that reps are different
 
 beetle.in %>%
   ggplot(aes(x=year,y=infestedArea_ha, group=wind_speed, color=wind_speed, fill=wind_speed)) +
-  facet_grid(~gcm) +
+  facet_grid(gcm~rcp) +
   # geom_line() +
   stat_summary(fun="mean",geom="line",size=1) +
   stat_summary(fun.min="min",fun.max="max",geom="ribbon", alpha=0.2, color=NA) +
@@ -210,7 +215,7 @@ beetle.in %>%
 
 beetle.in %>%
   ggplot(aes(x=year,y=killedBasalArea, group=wind_speed, color=wind_speed, fill=wind_speed)) +
-  facet_grid(~gcm) +
+  facet_grid(gcm~rcp) +
   # geom_line() +
   stat_summary(fun="mean",geom="line",size=1) +
   stat_summary(fun.min="min",fun.max="max",geom="ribbon", alpha=0.2, color=NA) +
@@ -221,7 +226,7 @@ beetle.in %>%
 wind.complete <- complete(wind.in, gcm, rcp,wind_speed,rep,year=1:80, fill=list(area_ha=0,killedBasalArea=0,killedVolume=0))
 
 wind.complete %>%
-  ggplot(aes(x=year,y=area_ha, group=rep, color=rep, fill=rep)) +
+  ggplot(aes(x=year,y=area_ha, group=rep, color=rcp, fill=rcp)) +
   facet_grid(gcm~wind_speed) +
   geom_line() +
   theme_bw() # check that reps are different
@@ -229,7 +234,7 @@ wind.complete %>%
 # higher speed
 wind.in %>%
   ggplot(aes(x=year,y=windspeed_ms, group=wind_speed, color=wind_speed, fill=wind_speed)) +
-  facet_grid(~gcm) +
+  facet_grid(gcm~rcp) +
   # geom_line() +
   stat_summary(fun="mean", fun.min="min",fun.max="max",geom="pointrange") +
   # stat_summary(fun.min="min",fun.max="max",geom="ribbon", alpha=0.2, color=NA) +
@@ -239,7 +244,7 @@ wind.in %>%
 wind.complete %>%
 # wind.in %>%
   ggplot(aes(x=year,y=area_ha, group=wind_speed, color=wind_speed, fill=wind_speed)) +
-  facet_grid(~gcm) +
+  facet_grid(gcm~rcp) +
   # geom_line() +
   stat_summary(fun="mean", geom="line", size=1) +
   stat_summary(fun.min="min",fun.max="max",geom="ribbon", alpha=0.2, color=NA) +
@@ -249,7 +254,7 @@ wind.complete %>%
 wind.complete %>%
 # wind.in %>%
   ggplot(aes(x=year,y=killedBasalArea, group=wind_speed, color=wind_speed, fill=wind_speed)) +
-  facet_grid(~gcm) +
+  facet_grid(gcm~rcp) +
   # geom_line() +
   stat_summary(fun="mean", geom="line", size=1) +
   stat_summary(fun.min="min",fun.max="max",geom="ribbon", alpha=0.2, color=NA) +
@@ -294,12 +299,12 @@ dist.sub %>%
 # comparison between these scenarios
 dist.sub %>%
   ungroup() %>%
-  group_by(rcp,wind_speed) %>%
+  group_by(wind_speed) %>%
   summarise(killedBasalArea = sum(killedBasalArea)) %>%
   pivot_wider(names_from = "wind_speed",values_from = "killedBasalArea") %>%
   mutate(diff = `15`/`0`,
          rel_diff = (`15`-`0`)/`0`)
-# nearly 1.5 x higher, or 48% increase in disturbed BA
+# more than 1.5 x higher, or 57% increase across RCP4.5, 8.5
 
 # dist.sub %>%
 #   # mutate(disturbance=factor(disturbance,levels=c("wind","beetle"))) %>%
@@ -332,9 +337,9 @@ ba.prep <- land.in %>%
   group_by(gcm,rcp,wind_speed,rep,year) %>%
   summarise(basal_area_m2=sum(basal_area_m2)) %>%
   ungroup() %>%
-  filter(year==80) %>%
-  group_by(year) %>%
-  summarise(min=min(basal_area_m2),max=max(basal_area_m2))
+  filter(year %in% c(0,80)) %>%
+  group_by(year,wind_speed) %>%
+  summarise(min=min(basal_area_m2),max=max(basal_area_m2), mean=mean(basal_area_m2))
 
 (max(ba.prep$max)-27.2)/27.2
 (min(ba.prep$min)-27.2)/27.2
@@ -370,5 +375,6 @@ land.in %>%
   stat_summary(fun="mean",geom="line",size=1) +
   stat_summary(fun.min="min",fun.max="max",geom="ribbon", alpha=0.2, color=NA) +
   theme_bw()
+
 ```
 

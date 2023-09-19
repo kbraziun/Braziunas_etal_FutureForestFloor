@@ -40,8 +40,8 @@ pres.in <- read.csv("processed_data/understory_model/understory_subset_presence_
 # predictors: forest
 pred.in <- read.csv("processed_data/understory_model/predictors_fullset.csv") %>%
   # only forest predictor set
-  dplyr::select(c(plot_id,TSFdec,tph:prop_fasy)) 
-
+  dplyr::select(c(plot_id,TSFdec,tph,BA,mean_dbh,sd_height,dom_height,tree_richness,prop_evergreen,prop_fasy))
+                  
 # pft lookup
 pft.in <- read.csv("processed_data/species_lookup/final_pft_categories_ms.csv") %>%
   separate(pft, into=c("light","temp"), sep="-")
