@@ -5,7 +5,9 @@
 This readme gives an overview of directory structure, files, and steps for recreating
 outputs and analyses associated with Braziunas et al. Future Forest Floor.
 
-**Manuscript citation:** Braziunas, K.H., L. Geres, T. Richter, F. Glasmann, C. Senf, D. Thom, S. Seibold, and R. Seidl. In Review. Projected climate and canopy change lead to thermophilization and homogenization of forest floor vegetation in a hotspot of plant species richness.
+**Manuscript citation:** Braziunas, K.H., L. Geres, T. Richter, F. Glasmann, C. Senf, D. Thom, S. Seibold, and R. Seidl. In Revision. Projected climate and canopy change lead to thermophilization and homogenization of forest floor vegetation in a hotspot of plant species richness. Global Change Biology.
+
+**Dataset citation:** Braziunas, K.H., L. Geres, T. Richter, F. Glasmann, C. Senf, D. Thom, S. Seibold, and R. Seidl. 2023. Projected climate and canopy change lead to thermophilization and homogenization of forest floor vegetation in a hotspot of plant species richness, Berchtesgaden National Park, Bavaria, Germany ver 1. Environmental Data Initiative. https://doi.org/10.6073/pasta/06954751c87ea7695dd043844e2745f9
 
 ## platforms
 

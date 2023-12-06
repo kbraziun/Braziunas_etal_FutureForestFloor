@@ -781,195 +781,14 @@ func.firstck <- func.cats %>%
   group_by(PlantGrowthForm,licht_cat,temp_cat) %>%
   summarise(across(c(cover,pres,n_species),~sum(.)))
 
-# func.licht <- func.cats %>%
-#   group_by(PlantGrowthForm,licht_cat) %>%
-#   tally()
-# 
-# func.temp <- func.cats %>%
-#   group_by(PlantGrowthForm,temp_cat) %>%
-#   tally()
-
-### TRY categories
-try.traits <- read.csv("data/Traits/TRY_full_PFT_traits/TRY_PFT_traits.csv", header=TRUE) %>%
-  # just get the traits
-  filter(!is.na(TraitID)) 
-
-unq <- unique(try.traits$OrigValueStr)
-# print(unq)[1000:1900]
-
-phen.traits <- try.traits %>%
-  filter(OrigValueStr %in% c("perennial","perennials","always pluriennial-pollakanthic","Perennial","poly-annuals < 5 years (short-lived perennials)","poly-annuals > 50 years (long-lived perennials)","poly-annuals 5-50 years (medium-lived perennials)","perennial forb","perennial/woody","perennial grass","Herbaceous perennial","biennial/perennial","bisannual/perennial","biennial-perennial","always biennial, always pluriennial-hapaxanthic","always biennial, always pluriennial-pollakanthic","perennial <50 yrs","long lived perennial >= 50 yrs.","Perennial grass","Biennial, Perennial","biennial","Biennial","annual","Annual","annual forb","annuals","summer annuals","winter annuals","always annual","annual-winter annual","therophyte","Therophyte (annual land plant)","Therophyte","always Therophyte","annual-winter annual, biennial","annual/biennial","therophyte/hemicryptophyte","Therophyte/Hemicryptophyte","always annual, always biennial","annual/perennial","Annual, Perennial","annual-perennial","always annual, always biennial, always pluriennial-pollakanthic")) %>%
-  mutate(lifeHistory=ifelse(OrigValueStr %in% c("perennial","perennials","always pluriennial-pollakanthic","Perennial","poly-annuals < 5 years (short-lived perennials)","poly-annuals > 50 years (long-lived perennials)","poly-annuals 5-50 years (medium-lived perennials)","perennial forb","perennial/woody","perennial grass","Herbaceous perennial","biennial/perennial","bisannual/perennial","biennial-perennial","always biennial, always pluriennial-hapaxanthic","always biennial, always pluriennial-pollakanthic","perennial <50 yrs","long lived perennial >= 50 yrs.","Perennial grass","Biennial, Perennial","biennial","Biennial"),"biennial-perennial",
-                            ifelse(OrigValueStr %in% c("annual","Annual","annual forb","annuals","summer annuals","winter annuals","always annual","annual-winter annual","therophyte","Therophyte (annual land plant)","Therophyte","always Therophyte"),"annual",
-                                   ifelse(OrigValueStr %in% c("annual-winter annual, biennial","annual/biennial","therophyte/hemicryptophyte","Therophyte/Hemicryptophyte","always annual, always biennial","annual/perennial","Annual, Perennial","annual-perennial","always annual, always biennial, always pluriennial-pollakanthic"), "double-check",NA)))) %>%
-  group_by(AccSpeciesID,AccSpeciesName,lifeHistory) %>%
-  tally() %>%
-  slice_max(n, with_ties=TRUE)
-
-# any species with contrasting entries
-phen.test <- phen.traits %>%
-  group_by(AccSpeciesID,AccSpeciesName) %>%
-  tally() %>%
-  filter(n>1)
-
-phen.agree <- phen.traits %>%
-  filter(!AccSpeciesID %in% c(phen.test$AccSpeciesID)) %>%
-  ungroup() %>%
-  # remove unneeded columns
-  dplyr::select(c(AccSpeciesID,lifeHistory))
-
-phen.out <- func.cats %>%
-  mutate(species_name_try = gsub("_"," ",species_name)) %>%
-  # address name inconsistencies
-  mutate(species_name_try = ifelse(species_name_try =="Alchemilla vulgaris","Alchemilla vulgaris agg.",species_name_try)) %>%
-  # join with TRY IDs
-  left_join(spec.in, by=c("species_name_try"="species_name")) %>%
-  dplyr::select(c(species_name:TRYSpeciesID)) %>%
-  rename(PlantGrowthForm=PlantGrowthForm.x) %>%
-  # now add lifespan
-  left_join(phen.agree, by=c("TRYSpeciesID"="AccSpeciesID"))
-
-# look at missing species
-phen.out[is.na(phen.out$lifeHistory),]$TRYSpeciesID
-try.sub <- try.traits %>%
-  filter(AccSpeciesID %in% c(phen.out[is.na(phen.out$lifeHistory),]$TRYSpeciesID),
-         TraitID %in% c(59,343))
-# write.csv(try.sub, "processed_data/species_lookup/try_phen_temp.csv",row.names=FALSE)
-
-### now ht
-
-ht.traits <- try.traits %>%
-  filter(TraitName=="Plant height vegetative") %>%
-  ungroup() %>%
-  mutate(OrigValueStr = as.numeric(OrigValueStr)) %>%
-  group_by(AccSpeciesID,AccSpeciesName,TraitName,OriglName,OrigUnitStr) %>%
-  # add multiplier for units
-  mutate(unit_mult = ifelse(OrigUnitStr=="m",1,
-                            ifelse(OrigUnitStr %in% c("cm","(cm)"," cm"),0.01,
-                                   ifelse(OrigUnitStr=="mm",0.001,NA))),
-         new_value = unit_mult*OrigValueStr,
-         ht_cat = ifelse(new_value<=0.5,"short",
-                         ifelse(new_value>0.5,"tall",NA))) %>%
-                       # ifelse(new_value>0.5 & new_value<=2.0,"tall",
-                              # ifelse(new_value>2.0,"very_tall",NA)))) %>%
-  filter(!is.na(ht_cat)) %>%
-  ungroup() %>%
-  group_by(AccSpeciesID,AccSpeciesName,TraitName,ht_cat) %>%
-  tally() %>%
-  slice_max(n,with_ties=TRUE)
-
-# any species with contrasting entries
-ht.test <- ht.traits %>%
-  group_by(AccSpeciesID,AccSpeciesName) %>%
-  tally() %>%
-  filter(n>1)
-
-ht.agree <- ht.traits %>%
-  filter(!AccSpeciesID %in% c(ht.test$AccSpeciesID)) %>%
-  ungroup() %>%
-  # remove unneeded columns
-  dplyr::select(c(AccSpeciesID,ht_cat))
-
-
-ht.out <- phen.out %>%
-  # now add ht
-  left_join(ht.agree, by=c("TRYSpeciesID"="AccSpeciesID"))
-
-# look at missing species
-ht.out[is.na(ht.out$ht_cat),]$TRYSpeciesID
-try.sub2 <- try.traits %>%
-  filter(AccSpeciesID %in% c(ht.out[is.na(ht.out$ht_cat),]$TRYSpeciesID),
-         TraitID %in% c(3106)) 
-# write.csv(try.sub2, "processed_data/species_lookup/try_ht_temp.csv",row.names=FALSE)
-
-# current groups
-func.secondck <- ht.out %>%
-  mutate(n_species=1) %>%
-  group_by(PlantGrowthForm,licht_cat,temp_cat,lifeHistory,ht_cat) %>%
-  summarise(across(c(cover,pres,n_species),~sum(.)))
-
-### write out func groups for correcting
-# write.csv(ht.out, "processed_data/species_lookup/pft_cats_orig.csv",row.names=FALSE)
-
-# ### get IDs for TRY data request, done
-# try.ids <- veg.in %>% 
-#   # join to ellenberg lookup names
-#   mutate(species_name_model = gsub("_"," ",species_name)) %>%
-#   left_join(ellen.names, by=c("species_name_model"="species_name_new")) %>%
-#   # remove unneeded name columns
-#   # join to ellenberg indicators
-#   left_join(ellen.in, by=c("species_name_ellenberg"="species_name","TRYSpeciesID","TRYSpeciesName")) %>%
-#   group_by(TRYSpeciesID,TRYSpeciesName) %>%
-#   slice(1) # 422
-# paste(list(unique(try.ids$TRYSpeciesID)),sep=",")
-
-### read back in func groups
-func.fin <- read.xlsx("processed_data/species_lookup/pft_cats.xlsx", sheet="pft_cats")
-
-# exhaustive set, too many pfts
-func.exh <- func.fin %>%
-  mutate(n_species=1) %>%
-  group_by(PlantGrowthForm,licht_cat,temp_cat,lifeHistory,ht_cat) %>%
-  summarise(across(c(cover,pres,n_species),~sum(.))) %>%
-  filter(!is.na(licht_cat))
-func.exh
-
-func.htphen <- func.fin %>%
-  mutate(n_species=1) %>%
-  group_by(PlantGrowthForm,lifeHistory,ht_cat) %>%
-  summarise(across(c(cover,pres,n_species), ~sum(.))) %>%
-  filter(!is.na(ht_cat))
-func.htphen 
-
-func.htsub <- func.fin %>%
-  filter(species_name %in% c(red.pres$species_name)) %>%
-  mutate(n_species=1) %>%
-  group_by(PlantGrowthForm,lifeHistory,ht_cat) %>%
-  summarise(across(c(cover,pres,n_species), ~sum(.)))
-func.htsub # unbalanced
-
-func.fullsub <- func.fin %>%
-  filter(species_name %in% c(red.pres$species_name)) %>%
-  mutate(n_species=1) %>%
-  group_by(PlantGrowthForm,lifeHistory,ht_cat,licht_cat,temp_cat) %>%
-  summarise(across(c(cover,pres,n_species), ~sum(.)))
-
-func.finsub <- func.fin %>%
-  filter(species_name %in% c(red.pres$species_name)) %>%
-  mutate(n_species=1) %>%
-  # put nas into indiff cats
-  mutate(licht_cat = ifelse(is.na(licht_cat),"shade-tol-indiff",licht_cat),
-         temp_cat = ifelse(is.na(temp_cat),"indiff",temp_cat)) %>%
-  group_by(ht_cat,licht_cat,temp_cat) %>%
-  summarise(across(c(cover,pres,n_species), ~sum(.)))
-
-func.finsub # 12 PFTs, all with at least 6 and less than 50 species, based on expected response to environmental drivers and categorized by relevant attribute for competition with tree seedlings (height)
-
-# final pfts, with simple names and species lookup
-pft.sp <- func.fin %>%
-  # remove unneeded columns
-  dplyr::select(-c(TRYSpeciesID,Comments)) %>%
-  # put nas into indiff cats, not needed so leave these out for now
-  # mutate(licht_cat = ifelse(is.na(licht_cat),"shade-tol-indiff",licht_cat),
-  #        temp_cat = ifelse(is.na(temp_cat),"indiff",temp_cat)) %>%
-  # add shorthand pft names
-  mutate(pft1 = ifelse(licht_cat=="light-pref","light",
-                       ifelse(licht_cat=="shade-tol-indiff","shade",NA)),
-         pft2 = ifelse(temp_cat=="indiff","notemp",
-                       ifelse(temp_cat=="subalpine-alpine","cold",
-                              ifelse(temp_cat=="submontane-montane","warm",NA)))) %>%
-  mutate(pft = paste(ht_cat,pft1,pft2,sep="-")) %>%
-  dplyr::select(-c(pft1,pft2))
-
-# commented out for Rmd
-# write.csv(pft.sp, "processed_data/species_lookup/full_pft_categories.csv",row.names=FALSE)
+### final func groups
+func.fin <- func.cats
 
 # final pft cats for paper
 pft.ms <- func.fin %>%
+  mutate(species_name_try = gsub("_"," ",species_name)) %>%
   filter(pres>=5) %>%
   filter(!grepl("spec.",species_name,fixed=TRUE)) %>%
-  # remove unneeded columns
-  dplyr::select(-c(TRYSpeciesID,Comments)) %>%
   # put nas into indiff cats, not needed so leave these out for now
   # mutate(licht_cat = ifelse(is.na(licht_cat),"shade-tol-indiff",licht_cat),
   #        temp_cat = ifelse(is.na(temp_cat),"indiff",temp_cat)) %>%
@@ -982,31 +801,15 @@ pft.ms <- func.fin %>%
   mutate(prevalence = pres/150,
          pft = paste(pft1,pft2,sep="-")) %>%
   filter(species_name %in% c(veg.sub$species_name)) %>%
-  dplyr::select(-c(pft1,pft2,cover,pres,licht_cat,temp_cat,lifeHistory,ht_cat))
+  dplyr::select(c(species_name,species_name_ellenberg,species_name_try,PlantGrowthForm,prevalence,pft))
 
 # commented out for Rmd
 # write.csv(pft.ms, "processed_data/species_lookup/final_pft_categories_ms.csv",row.names=FALSE)
 
 # check pft coverage for different subsets of data
-pft.cks <- func.fin %>%
-  filter(!grepl("spec.",species_name,fixed=TRUE)) %>%
-  # remove unneeded columns
-  dplyr::select(-c(TRYSpeciesID,Comments)) %>%
-  # put nas into indiff cats, not needed so leave these out for now
-  # mutate(licht_cat = ifelse(is.na(licht_cat),"shade-tol-indiff",licht_cat),
-  #        temp_cat = ifelse(is.na(temp_cat),"indiff",temp_cat)) %>%
-  # add shorthand pft names
-  mutate(pft1 = ifelse(licht_cat=="light-pref","light",
-                       ifelse(licht_cat=="shade-tol-indiff","shade",NA)),
-         pft2 = ifelse(temp_cat=="indiff","notemp",
-                       ifelse(temp_cat=="subalpine-alpine","cold",
-                              ifelse(temp_cat=="submontane-montane","warm",NA)))) %>%
-  mutate(prevalence = pres/150,
-         pft = paste(pft1,pft2,sep="_")) %>%
-  dplyr::select(-c(pft1,pft2,cover,pres,licht_cat,temp_cat,lifeHistory,ht_cat))
 
 out.pres %>% 
-  left_join(pft.cks, by="species_name") %>%
+  left_join(pft.ms, by="species_name") %>%
   filter(pft != "NA-NA") %>%
   group_by(plot_id) %>%
   mutate(tot_richness = sum(pres)) %>%
@@ -1020,7 +823,7 @@ out.pres %>%
   summarise(across(c(pres,tot_richness),~mean(.))) %>%
   mutate(prop = pres/tot_richness) %>%
   # mutate(elev_class = factor(elev_class,levels=c("submontan","montan","subalpin"))) %>%
-  mutate(pft=factor(pft,levels=c("light_cold","shade_cold","light_notemp","shade_notemp","light_warm","shade_warm"))) %>%
+  mutate(pft=factor(pft,levels=c("light-cold","shade-cold","light-notemp","shade-notemp","light-warm","shade-warm"))) %>%
   # ggplot(aes(x=elev_class,y=prop, fill=pft)) +
   ggplot(aes(x=1,y=prop, fill=pft)) +
   geom_bar(stat="identity") +
@@ -1029,7 +832,7 @@ out.pres %>%
   theme_bw()
 
 red.pres %>% 
-  left_join(pft.cks, by="species_name") %>%
+  left_join(pft.ms, by="species_name") %>%
   filter(pft != "NA-NA") %>%
   group_by(plot_id) %>%
   mutate(tot_richness = sum(pres)) %>%
@@ -1043,7 +846,7 @@ red.pres %>%
   summarise(across(c(pres,tot_richness),~mean(.))) %>%
   mutate(prop = pres/tot_richness) %>%
   # mutate(elev_class = factor(elev_class,levels=c("submontan","montan","subalpin"))) %>%
-  mutate(pft=factor(pft,levels=c("light_cold","shade_cold","light_notemp","shade_notemp","light_warm","shade_warm"))) %>%
+  mutate(pft=factor(pft,levels=c("light-cold","shade-cold","light-notemp","shade-notemp","light-warm","shade-warm"))) %>%
   # ggplot(aes(x=elev_class,y=prop, fill=pft)) +
   ggplot(aes(x=1,y=prop, fill=pft)) +
   geom_bar(stat="identity") +
@@ -1052,7 +855,7 @@ red.pres %>%
   theme_bw()
 
 auc07.pres %>% 
-  left_join(pft.cks, by="species_name") %>%
+  left_join(pft.ms, by="species_name") %>%
   filter(pft != "NA-NA") %>%
   group_by(plot_id) %>%
   mutate(tot_richness = sum(pres)) %>%
@@ -1066,7 +869,7 @@ auc07.pres %>%
   summarise(across(c(pres,tot_richness),~mean(.))) %>%
   mutate(prop = pres/tot_richness) %>%
   # mutate(elev_class = factor(elev_class,levels=c("submontan","montan","subalpin"))) %>%
-  mutate(pft=factor(pft,levels=c("light_cold","shade_cold","light_notemp","shade_notemp","light_warm","shade_warm"))) %>%
+  mutate(pft=factor(pft,levels=c("light-cold","shade-cold","light-notemp","shade-notemp","light-warm","shade-warm"))) %>%
   # ggplot(aes(x=elev_class,y=prop, fill=pft)) +
   ggplot(aes(x=1,y=prop, fill=pft)) +
   geom_bar(stat="identity") +
