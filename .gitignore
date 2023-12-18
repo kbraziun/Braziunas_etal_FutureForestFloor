@@ -19,7 +19,3 @@ processed_data/iland_sdm_predictions/future_prediction_summaries/*
 !iland/scripts/
 !iland/scripts/*.R
 !iland/scripts/*.js
-!processed_data/iland_sdm_predictions/
-!processed_data/iland_sdm_predictions/response_rasters.tif
-!processed_data/iland_sdm_predictions/future_prediction_summaries/
-!processed_data/iland_sdm_predictions/future_prediction_summaries/scenario_mean_cv.csv
